@@ -1,0 +1,34 @@
+# Render Blueprint — one-click deploy of the academy app + PostgreSQL.
+# In Render: New + → Blueprint → connect this repo. Render reads this file,
+# creates the database and web service, and wires DATABASE_URL automatically.
+databases:
+  - name: imfaa-db
+    databaseName: imfaa
+    plan: free
+
+services:
+  - type: web
+    name: imfaa
+    runtime: node
+    plan: free
+    # Install deps and build the frontend into dist/ (served by the Express server).
+    buildCommand: npm install && npm run build
+    # Run only the API/server in production; it serves dist/ and the API on one port.
+    startCommand: npm run server
+    healthCheckPath: /api/health
+    envVars:
+      # Postgres connection string is injected from the database above.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: imfaa-db
+          property: connectionString
+      # Secret for signing login tokens — Render generates a strong random value.
+      - key: JWT_SECRET
+        generateValue: true
+      # Default admin login — CHANGE these in the Render dashboard after first deploy.
+      - key: ADMIN_ID
+        value: uttam5879
+      - key: ADMIN_PASSWORD
+        value: "5050"
+      - key: NODE_VERSION
+        value: "22"
