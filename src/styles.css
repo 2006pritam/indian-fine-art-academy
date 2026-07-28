@@ -708,11 +708,247 @@ h1, h2, h3, h4 { font-family: var(--font-head); line-height: 1.15; margin: 0 0 .
 
 /* Print only the card, cleanly */
 @media print {
-  body * { visibility: hidden; }
+  body:has(#reg-card-print) * { visibility: hidden; }
   #reg-card-print, #reg-card-print * { visibility: visible; }
   #reg-card-print {
     position: absolute; inset: 0; margin: 0; width: 100%;
     box-shadow: none; border: none; border-radius: 0;
   }
   .reg-card__print-btn, .dash__back { display: none !important; }
+}
+
+/* ── Status badges ─────────────────────────────────────────────────────── */
+.status-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.status-badge--approved { background: #d1fae5; color: #065f46; }
+.status-badge--pending  { background: #fef3c7; color: #92400e; }
+.status-badge--rejected { background: #fee2e2; color: #991b1b; }
+
+.profile-card__status { margin: 6px 0 2px; }
+
+.approval-btns { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.btn--xs { padding: 2px 7px; font-size: .72rem; border-radius: 6px; }
+.btn--approve { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.btn--approve:hover { background: #a7f3d0; }
+.btn--reject  { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+.btn--reject:hover  { background: #fecaca; }
+
+/* ── Exam form payment ─────────────────────────────────────────────────── */
+.exam-fee {
+  margin-top: 16px;
+  padding: 14px 18px;
+  background: var(--tint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.exam-fee__label {
+  font-size: .82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--red-deep);
+}
+.exam-fee__amount {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--red);
+}
+.exam-fee__note {
+  font-size: .8rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.exam-terms {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 18px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 150ms;
+}
+.exam-terms:hover { background: var(--cream); }
+.exam-terms input[type="checkbox"] {
+  margin: 3px 0 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+.exam-terms span {
+  font-size: .9rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.pay-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.pay-badge--paid   { background: #d1fae5; color: #065f46; }
+.pay-badge--unpaid { background: #fef3c7; color: #92400e; }
+
+/* ── Admit release form ────────────────────────────────────────────────── */
+.admit-release-form { margin-top: 8px; }
+.admit-release-radio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 150ms;
+}
+.admit-release-radio:hover { background: var(--cream); }
+.admit-release-radio input { width: 18px; height: 18px; cursor: pointer; }
+.admit-picker select { margin-left: 6px; }
+
+/* ── Admit card (printable / downloadable) ─────────────────────────────── */
+.admit-card-wrap { max-width: 840px; margin: 0 auto; }
+.admit-card {
+  background: var(--white);
+  border: 1.5px solid var(--ink);
+  border-radius: 6px;
+  padding: 22px 26px;
+  color: var(--ink);
+}
+.admit-card__header { text-align: center; margin-bottom: 16px; }
+.admit-card__header strong {
+  display: block;
+  font-family: var(--font-head);
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.admit-card__header small { display: block; font-size: .9rem; color: var(--muted); margin-top: 2px; }
+
+.admit-card__titlerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+.admit-card__title {
+  font-weight: 800;
+  font-size: 1.15rem;
+  letter-spacing: .06em;
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  padding: 6px 20px;
+}
+.admit-card__roll { display: flex; align-items: center; gap: 8px; }
+.admit-card__roll-label { font-weight: 700; font-size: .85rem; }
+.admit-card__roll-boxes { display: flex; }
+.admit-card__roll-boxes span {
+  width: 26px;
+  height: 30px;
+  border: 1px solid var(--ink);
+  border-right: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+.admit-card__roll-boxes span:last-child { border-right: 1px solid var(--ink); }
+
+.admit-card__body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+.admit-card__table { flex: 1; border-collapse: collapse; }
+.admit-card__table th,
+.admit-card__table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  font-size: .95rem;
+}
+.admit-card__table th {
+  width: 42%;
+  font-weight: 600;
+  color: var(--muted);
+}
+.admit-card__table td { font-weight: 600; }
+.admit-card__photo {
+  width: 120px;
+  height: 150px;
+  border: 1.5px solid var(--ink);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--tint);
+}
+.admit-card__photo img { width: 100%; height: 100%; object-fit: cover; }
+.admit-card__photo span { font-size: 3rem; font-weight: 700; color: var(--red); }
+
+.admit-card__exam-time {
+  margin: 18px 0 0;
+  padding: 10px 14px;
+  background: var(--tint);
+  border-radius: 8px;
+  font-size: .95rem;
+}
+.admit-card__footer {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+  text-align: center;
+}
+.admit-card__verified {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1a8f3c;
+  font-weight: 700;
+  font-size: .85rem;
+  border: 1px solid #b7e3c4;
+  background: #edfaf0;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+.admit-card__caption { color: var(--muted); font-size: .78rem; font-style: italic; margin: 10px 0 0; }
+.admit-card__print-btn { display: block; margin: 22px auto 0; }
+
+@media (max-width: 540px) {
+  .admit-card__body { flex-direction: column-reverse; align-items: center; }
+  .admit-card__photo { margin: 0 auto; }
+  .admit-card__titlerow { justify-content: center; }
+}
+
+/* Print only the admit card, cleanly */
+@media print {
+  body:has(#admit-card-print) * { visibility: hidden; }
+  #admit-card-print, #admit-card-print * { visibility: visible; }
+  #admit-card-print {
+    position: absolute; inset: 0; margin: 0; width: 100%;
+    box-shadow: none; border: 1.5px solid #000; border-radius: 0;
+  }
+  .admit-card__print-btn { display: none !important; }
 }

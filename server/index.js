@@ -73,6 +73,12 @@ async function init() {
     ALTER TABLE students ADD COLUMN IF NOT EXISTS reg_no TEXT UNIQUE;
   `)
 
+  // Approval status for registrations. Existing rows default to 'approved' so
+  // nothing already in the DB is suddenly hidden.
+  await pool.query(`
+    ALTER TABLE students ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'approved';
+  `)
+
   // Exam sessions (years the admin has opened for fill-up)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS exam_sessions (
@@ -97,6 +103,27 @@ async function init() {
       created_at    TIMESTAMPTZ DEFAULT now(),
       UNIQUE (student_id, exam_year, exam_class)
     );
+  `)
+
+  // Approval status for exam forms. Existing rows default to 'approved'.
+  await pool.query(`
+    ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'approved';
+  `)
+
+  // Payment status for exam forms. Fee is looked up live from exam_fees;
+  // this only tracks whether the admin has marked the form as paid.
+  await pool.query(`
+    ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
+  `)
+
+  // Admit card release. admit_released flips true once the admin releases the
+  // card (only for approved + paid forms); exam_datetime is the admin-typed
+  // "Time & Date of Examination" line shown on the card.
+  await pool.query(`
+    ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS admit_released BOOLEAN NOT NULL DEFAULT false;
+  `)
+  await pool.query(`
+    ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS exam_datetime TEXT;
   `)
 
   // Exam fees per class/level (admin-configurable)
@@ -149,7 +176,7 @@ function auth(role) {
 
 // Shared columns returned to clients (exclude nothing sensitive except handled per-route)
 const STUDENT_COLS =
-  'id, reg_no, full_name, co_name, phone, email, aadhaar, dob, gender, address, current_class, photo, created_at'
+  'id, reg_no, full_name, co_name, phone, email, aadhaar, dob, gender, address, current_class, photo, status, created_at'
 
 /* ---------------------------------------------------------------- routes */
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
@@ -207,8 +234,8 @@ app.post('/api/public/register', async (req, res) => {
       return res.status(409).json({ error: 'This Aadhaar number is already registered. The form cannot be submitted again.', regNo: dup.rows[0].reg_no })
     const { rows } = await pool.query(
       `INSERT INTO students
-        (full_name, co_name, phone, email, aadhaar, dob, gender, address, current_class, photo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        (full_name, co_name, phone, email, aadhaar, dob, gender, address, current_class, photo, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
        RETURNING id, created_at`,
       [b.fullName, b.coName || null, b.phone || null, b.email || null, aadhaar,
        b.dob, b.gender || null, b.address || null, b.currentClass || null, b.photo || null]
@@ -300,6 +327,23 @@ app.delete('/api/admin/students/:id', auth('admin'), async (req, res) => {
   res.json({ ok: true })
 })
 
+// Approve / reject a student registration (admin)
+app.patch('/api/admin/students/:id/status', auth('admin'), async (req, res) => {
+  const { status } = req.body || {}
+  if (!['approved', 'rejected', 'pending'].includes(status))
+    return res.status(400).json({ error: 'Status must be approved, rejected or pending' })
+  try {
+    const { rows } = await pool.query(
+      `UPDATE students SET status=$1 WHERE id=$2 RETURNING ${STUDENT_COLS}`,
+      [status, req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    res.json({ student: rows[0] })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 /* ----------------------------------------------------- Exam form routes */
 
 // Lookup a student by registration number (admin — for exam fill-up)
@@ -371,10 +415,12 @@ async function createExamForm(req, res, filledBy) {
       return res.status(409).json({ error: `This student already has an exam form for ${examYear}` })
 
     const rollNo = await generateRollNo(centerCode.trim(), examYear)
+    // Admin-filled forms are auto-approved; student-filled forms await approval.
+    const status = filledBy === 'admin' ? 'approved' : 'pending'
     const { rows } = await pool.query(
-      `INSERT INTO exam_forms (student_id, reg_no, roll_no, exam_class, exam_year, center_code, center_name, filled_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [student.id, student.reg_no, rollNo, examClass, examYear, centerCode.trim(), centerName.trim(), filledBy]
+      `INSERT INTO exam_forms (student_id, reg_no, roll_no, exam_class, exam_year, center_code, center_name, filled_by, status, payment_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'unpaid') RETURNING *`,
+      [student.id, student.reg_no, rollNo, examClass, examYear, centerCode.trim(), centerName.trim(), filledBy, status]
     )
     res.status(201).json({ exam: rows[0] })
   } catch (e) {
@@ -425,7 +471,7 @@ app.delete('/api/admin/exam-sessions/:year', auth('admin'), async (req, res) => 
 app.get('/api/admin/exams', auth('admin'), async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT e.*, s.full_name, s.current_class, s.photo
+      SELECT e.*, s.full_name, s.current_class, s.photo, s.co_name, s.dob
       FROM exam_forms e JOIN students s ON s.id = e.student_id
       ORDER BY e.created_at DESC
     `)
@@ -447,6 +493,116 @@ app.delete('/api/admin/exams/:id', auth('admin'), async (req, res) => {
   }
 })
 
+// Approve / reject an exam form (admin)
+app.patch('/api/admin/exams/:id/status', auth('admin'), async (req, res) => {
+  const { status } = req.body || {}
+  if (!['approved', 'rejected', 'pending'].includes(status))
+    return res.status(400).json({ error: 'Status must be approved, rejected or pending' })
+  try {
+    const { rows } = await pool.query(
+      'UPDATE exam_forms SET status=$1 WHERE id=$2 RETURNING *',
+      [status, req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    res.json({ exam: rows[0] })
+  } catch (e) {
+    console.error('PATCH /api/admin/exams status:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Mark an exam form paid / unpaid (admin)
+app.patch('/api/admin/exams/:id/payment', auth('admin'), async (req, res) => {
+  const { paymentStatus } = req.body || {}
+  if (!['paid', 'unpaid'].includes(paymentStatus))
+    return res.status(400).json({ error: 'Payment status must be paid or unpaid' })
+  try {
+    const { rows } = await pool.query(
+      'UPDATE exam_forms SET payment_status=$1 WHERE id=$2 RETURNING *',
+      [paymentStatus, req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    res.json({ exam: rows[0] })
+  } catch (e) {
+    console.error('PATCH /api/admin/exams payment:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Release admit cards (admin). Only approved + paid forms are eligible.
+//   scope: 'all'      -> every approved+paid form (optionally scoped to examYear)
+//   scope: 'specific' -> the single form matching rollNo
+// examDatetime is the "Time & Date of Examination" line printed on the card.
+app.post('/api/admin/exams/release', auth('admin'), async (req, res) => {
+  const { scope, rollNo, examDatetime, examYear } = req.body || {}
+  if (!examDatetime || !String(examDatetime).trim())
+    return res.status(400).json({ error: 'Time & Date of Examination is required' })
+  if (!['all', 'specific'].includes(scope))
+    return res.status(400).json({ error: 'Scope must be all or specific' })
+
+  try {
+    if (scope === 'specific') {
+      if (!rollNo || !String(rollNo).trim())
+        return res.status(400).json({ error: 'Roll number is required for a specific release' })
+      const found = await pool.query('SELECT status, payment_status FROM exam_forms WHERE roll_no=$1', [rollNo])
+      if (!found.rows.length) return res.status(404).json({ error: 'No exam form found for that roll number' })
+      const f = found.rows[0]
+      if (f.status !== 'approved' || f.payment_status !== 'paid')
+        return res.status(400).json({ error: 'Form must be approved and paid before release' })
+      await pool.query(
+        `UPDATE exam_forms SET admit_released=true, exam_datetime=$1
+         WHERE roll_no=$2 AND status='approved' AND payment_status='paid'`,
+        [examDatetime, rollNo]
+      )
+      return res.json({ released: 1 })
+    }
+
+    // scope === 'all'
+    const params = [examDatetime]
+    let sql = `UPDATE exam_forms SET admit_released=true, exam_datetime=$1
+               WHERE status='approved' AND payment_status='paid'`
+    if (examYear && String(examYear).trim()) {
+      params.push(examYear)
+      sql += ` AND exam_year=$2`
+    }
+    const { rowCount } = await pool.query(sql, params)
+    res.json({ released: rowCount })
+  } catch (e) {
+    console.error('POST /api/admin/exams/release:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Toggle admit release for a single exam form (admin). Used from the exams table.
+app.patch('/api/admin/exams/:id/admit', auth('admin'), async (req, res) => {
+  const { released, examDatetime } = req.body || {}
+  try {
+    if (released) {
+      const found = await pool.query('SELECT status, payment_status, exam_datetime FROM exam_forms WHERE id=$1', [req.params.id])
+      if (!found.rows.length) return res.status(404).json({ error: 'Not found' })
+      const f = found.rows[0]
+      if (f.status !== 'approved' || f.payment_status !== 'paid')
+        return res.status(400).json({ error: 'Form must be approved and paid before release' })
+      const dt = (examDatetime && String(examDatetime).trim()) || f.exam_datetime
+      if (!dt) return res.status(400).json({ error: 'Set a Time & Date first via Admit Release' })
+      const { rows } = await pool.query(
+        'UPDATE exam_forms SET admit_released=true, exam_datetime=$1 WHERE id=$2 RETURNING *',
+        [dt, req.params.id]
+      )
+      return res.json({ exam: rows[0] })
+    }
+    const { rows } = await pool.query(
+      'UPDATE exam_forms SET admit_released=false WHERE id=$1 RETURNING *',
+      [req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: 'Not found' })
+    res.json({ exam: rows[0] })
+  } catch (e) {
+    console.error('PATCH /api/admin/exams admit:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // Student fills own exam form
 app.post('/api/student/exams', auth('student'), async (req, res) => {
   try {
@@ -460,10 +616,12 @@ app.post('/api/student/exams', auth('student'), async (req, res) => {
   }
 })
 
-// Student lists own exam forms
+// Student lists own exam forms (joins student fields for the admit card)
 app.get('/api/student/exams', auth('student'), async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT * FROM exam_forms WHERE student_id=$1 ORDER BY created_at DESC',
+    `SELECT e.*, s.full_name, s.co_name, s.photo, s.dob
+     FROM exam_forms e JOIN students s ON s.id = e.student_id
+     WHERE e.student_id=$1 ORDER BY e.created_at DESC`,
     [req.user.id]
   )
   res.json({ exams: rows })
