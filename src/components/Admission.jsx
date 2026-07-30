@@ -1028,7 +1028,7 @@ function AdminDashboard({ session, onLogout }) {
 
           {/* Admit Release */}
           {page === 'admit' && (
-            <div>
+            <div className="reg-form admit-release">
               <div className="reg-form__section">
                 <h4>Release Admit Cards</h4>
                 <p className="exam-hint">
@@ -1039,16 +1039,18 @@ function AdminDashboard({ session, onLogout }) {
                 {relMsg && <p className="fee-saved">✓ {relMsg}</p>}
 
                 <div className="admit-release-form">
-                  <label className="admit-release-radio">
-                    <input type="radio" name="relScope" value="all"
-                      checked={relScope === 'all'} onChange={() => setRelScope('all')} />
-                    <span>All Students (every approved &amp; paid form)</span>
-                  </label>
-                  <label className="admit-release-radio">
-                    <input type="radio" name="relScope" value="specific"
-                      checked={relScope === 'specific'} onChange={() => setRelScope('specific')} />
-                    <span>Specific Student (by roll number)</span>
-                  </label>
+                  <div className="admit-release-scope">
+                    <label className="admit-release-radio">
+                      <input type="radio" name="relScope" value="all"
+                        checked={relScope === 'all'} onChange={() => setRelScope('all')} />
+                      <span>All Students (every approved &amp; paid form)</span>
+                    </label>
+                    <label className="admit-release-radio">
+                      <input type="radio" name="relScope" value="specific"
+                        checked={relScope === 'specific'} onChange={() => setRelScope('specific')} />
+                      <span>Specific Student (by roll number)</span>
+                    </label>
+                  </div>
 
                   {relScope === 'specific' && (
                     <div className="reg-form__grid">
