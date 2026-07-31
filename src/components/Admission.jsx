@@ -573,6 +573,8 @@ function AdminDashboard({ session, onLogout }) {
   const [newYear, setNewYear] = useState('')
   const [fees, setFees] = useState({}) // { [class]: amount }
   const [feeSaved, setFeeSaved] = useState('')
+  // Attendance page: optional exam-year filter ('' = all sessions)
+  const [attYear, setAttYear] = useState('')
   // Admit release form
   const [relScope, setRelScope] = useState('all')       // 'all' | 'specific'
   const [relRoll, setRelRoll] = useState('')
@@ -611,8 +613,8 @@ function AdminDashboard({ session, onLogout }) {
   }
 
   useEffect(() => { if (page === 'students' || page === 'home') load() }, [page])
-  useEffect(() => { if (page === 'exams') loadExams() }, [page])
-  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit') loadSessions() }, [page])
+  useEffect(() => { if (page === 'exams' || page === 'attendance') loadExams() }, [page])
+  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit' || page === 'attendance') loadSessions() }, [page])
   useEffect(() => { if (page === 'fees') loadFees() }, [page])
 
   const openSession = async () => {
@@ -678,6 +680,16 @@ function AdminDashboard({ session, onLogout }) {
     } catch (e) { setErr(e.message) }
   }
 
+  // Mark a student present / absent on an approved exam form.
+  // Clicking the active choice again clears the mark.
+  const setAttendance = async (id, value) => {
+    setErr('')
+    try {
+      const d = await api(`/api/admin/exams/${id}/attendance`, { method: 'PATCH', body: { attendance: value }, token: session.token })
+      setExams(p => p.map(e => e.id === id ? { ...e, ...d.exam } : e))
+    } catch (e) { setErr(e.message) }
+  }
+
   // Toggle admit release for one exam form (from the exams table)
   const toggleAdmit = async (id, released) => {
     try {
@@ -735,6 +747,7 @@ function AdminDashboard({ session, onLogout }) {
     { id: 'exams', icon: '📋', label: 'Exam Forms' },
     { id: 'fees', icon: '💰', label: 'Exam Fees' },
     { id: 'admit', icon: '🎟️', label: 'Admit Release' },
+    { id: 'attendance', icon: '✅', label: 'Attendance' },
   ]
 
   return (
@@ -779,6 +792,7 @@ function AdminDashboard({ session, onLogout }) {
             {page === 'fees' && 'Exam Fees'}
             {page === 'exam-new' && 'New Exam Form'}
             {page === 'admit' && 'Admit Release'}
+            {page === 'attendance' && 'Attendance'}
           </h1>
           <span className="ds-topbar__user">👤 {session.user.adminId}</span>
         </header>
@@ -1088,6 +1102,74 @@ function AdminDashboard({ session, onLogout }) {
               </div>
             </div>
           )}
+
+          {/* Attendance — approved exam forms only */}
+          {page === 'attendance' && (() => {
+            const approved = exams.filter(e => e.status === 'approved' && (!attYear || e.exam_year === attYear))
+            const present = approved.filter(e => e.attendance === 'present').length
+            const absent = approved.filter(e => e.attendance === 'absent').length
+            return (
+              <div>
+                <p className="exam-hint">
+                  Students whose exam form is filled and <strong>approved</strong>. Mark each one
+                  Present or Absent — click the same button again to clear the mark.
+                </p>
+                {err && <p className="auth__err">{err}</p>}
+
+                <div className="ds-toolbar att-toolbar">
+                  <label className="att-filter">
+                    Exam Year
+                    <select value={attYear} onChange={e => setAttYear(e.target.value)}>
+                      <option value="">All sessions</option>
+                      {sessions.map(y => <option key={y}>{y}</option>)}
+                    </select>
+                  </label>
+                  <span className="ds-count">
+                    {approved.length} student(s) · {present} present · {absent} absent
+                    {approved.length - present - absent > 0 && ` · ${approved.length - present - absent} unmarked`}
+                  </span>
+                </div>
+
+                <div className="ds-table-wrap">
+                  <table className="ds-table">
+                    <thead><tr><th>Roll No</th><th>Reg No</th><th>Name</th><th>Class</th><th>Session</th><th>Center</th><th>Attendance</th></tr></thead>
+                    <tbody>
+                      {approved.length === 0 && (
+                        <tr><td colSpan="7" className="ds-empty-cell">No approved exam forms{attYear && ` for ${attYear}`} yet.</td></tr>
+                      )}
+                      {approved.map(e => (
+                        <tr key={e.id}>
+                          <td><strong>{e.roll_no}</strong></td>
+                          <td><span className="reg-badge reg-badge--sm">{e.reg_no}</span></td>
+                          <td>{e.full_name}</td>
+                          <td>{e.exam_class}</td>
+                          <td>{e.exam_year}</td>
+                          <td>{e.center_name} <small>({e.center_code})</small></td>
+                          <td>
+                            <span className={`att-badge att-badge--${e.attendance || 'none'}`}>
+                              {e.attendance === 'present' ? 'Present' : e.attendance === 'absent' ? 'Absent' : 'Not marked'}
+                            </span>
+                            <span className="att-btns">
+                              <button
+                                className={`btn btn--xs btn--approve${e.attendance === 'present' ? ' is-active' : ''}`}
+                                onClick={() => setAttendance(e.id, e.attendance === 'present' ? null : 'present')}>
+                                Present
+                              </button>
+                              <button
+                                className={`btn btn--xs btn--reject${e.attendance === 'absent' ? ' is-active' : ''}`}
+                                onClick={() => setAttendance(e.id, e.attendance === 'absent' ? null : 'absent')}>
+                                Absent
+                              </button>
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )
+          })()}
         </div>
       </div>
     </div>

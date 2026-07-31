@@ -724,6 +724,9 @@ section[id] { scroll-margin-top: 84px; }
   .btn--xs { padding: 6px 10px; font-size: .75rem; }
   .approval-btns { gap: 6px; margin-top: 4px; }
   .dash__del { padding: 7px 12px; }
+
+  /* Stack the badge and the Present/Absent toggles so the cell stays narrow. */
+  .att-btns { display: flex; margin-left: 0; margin-top: 6px; gap: 6px; }
 }
 
 /* Very small phones (≤360px: Galaxy A / older iPhone SE) */
@@ -1002,6 +1005,52 @@ section[id] { scroll-margin-top: 84px; }
 }
 .pay-badge--paid   { background: #d1fae5; color: #065f46; }
 .pay-badge--unpaid { background: #fef3c7; color: #92400e; }
+
+/* ── Attendance ────────────────────────────────────────────────────────── */
+.att-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.att-badge--present { background: #d1fae5; color: #065f46; }
+.att-badge--absent  { background: #fee2e2; color: #991b1b; }
+.att-badge--none    { background: #eef2f7; color: #64748b; }
+
+/* Present / Absent toggles. Wrap under the badge on narrow cells rather than
+   forcing the table wider. */
+.att-btns { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 6px; vertical-align: middle; }
+
+/* The chosen option reads as selected, not just hoverable. */
+.att-btns .btn--approve.is-active { background: #059669; color: #fff; border-color: #059669; }
+.att-btns .btn--reject.is-active  { background: #dc2626; color: #fff; border-color: #dc2626; }
+
+/* Year filter sits in the toolbar, outside .reg-form, so it needs its own
+   control styling. */
+.att-toolbar { justify-content: flex-start; }
+.att-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: .85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.att-filter select {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--white);
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink);
+  min-width: 0;
+}
+.att-filter select:focus { outline: 2px solid var(--red); outline-offset: 1px; }
 
 /* ── Admit release form ────────────────────────────────────────────────── */
 .admit-release { max-width: 720px; }

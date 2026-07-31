@@ -126,6 +126,12 @@ async function init() {
     ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS exam_datetime TEXT;
   `)
 
+  // Attendance for approved exam forms, marked by the admin on exam day.
+  // NULL = not yet marked; otherwise 'present' or 'absent'.
+  await pool.query(`
+    ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS attendance TEXT;
+  `)
+
   // Exam fees per class/level (admin-configurable)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS exam_fees (
@@ -525,6 +531,35 @@ app.patch('/api/admin/exams/:id/payment', auth('admin'), async (req, res) => {
     res.json({ exam: rows[0] })
   } catch (e) {
     console.error('PATCH /api/admin/exams payment:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Mark attendance on an approved exam form (admin).
+// attendance: 'present' | 'absent' | null (null clears an accidental mark)
+app.patch('/api/admin/exams/:id/attendance', auth('admin'), async (req, res) => {
+  const { attendance } = req.body || {}
+  if (attendance !== null && !['present', 'absent'].includes(attendance))
+    return res.status(400).json({ error: 'Attendance must be present or absent' })
+  try {
+    // Only approved forms can be marked.
+    const found = await pool.query('SELECT status FROM exam_forms WHERE id=$1', [req.params.id])
+    if (!found.rows.length) return res.status(404).json({ error: 'Not found' })
+    if (found.rows[0].status !== 'approved')
+      return res.status(400).json({ error: 'Only approved exam forms can be marked' })
+
+    // Return the joined row so the client keeps the student's name.
+    const { rows } = await pool.query(`
+      UPDATE exam_forms e SET attendance=$1 WHERE e.id=$2
+      RETURNING e.*, (SELECT s.full_name    FROM students s WHERE s.id = e.student_id) AS full_name,
+                     (SELECT s.current_class FROM students s WHERE s.id = e.student_id) AS current_class,
+                     (SELECT s.photo         FROM students s WHERE s.id = e.student_id) AS photo,
+                     (SELECT s.co_name       FROM students s WHERE s.id = e.student_id) AS co_name,
+                     (SELECT s.dob           FROM students s WHERE s.id = e.student_id) AS dob
+    `, [attendance, req.params.id])
+    res.json({ exam: rows[0] })
+  } catch (e) {
+    console.error('PATCH /api/admin/exams attendance:', e.message)
     res.status(500).json({ error: e.message })
   }
 })
