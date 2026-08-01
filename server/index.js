@@ -132,6 +132,30 @@ async function init() {
     ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS attendance TEXT;
   `)
 
+  // Subject-wise results. Totals and percentage are calculated again by the
+  // server so saved results cannot depend on client-side calculations.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS exam_results (
+      id                    SERIAL PRIMARY KEY,
+      exam_form_id          INTEGER NOT NULL REFERENCES exam_forms(id) ON DELETE CASCADE,
+      subject               TEXT NOT NULL,
+      subject_key           TEXT NOT NULL,
+      sectional_obtained    NUMERIC(8,2) NOT NULL,
+      sectional_total       NUMERIC(8,2) NOT NULL,
+      practical_obtained    NUMERIC(8,2) NOT NULL,
+      practical_total       NUMERIC(8,2) NOT NULL,
+      theory_obtained       NUMERIC(8,2) NOT NULL,
+      theory_total          NUMERIC(8,2) NOT NULL,
+      total_obtained        NUMERIC(8,2) NOT NULL,
+      total_marks           NUMERIC(8,2) NOT NULL,
+      percentage            NUMERIC(6,2) NOT NULL,
+      grade                 TEXT NOT NULL,
+      created_at            TIMESTAMPTZ DEFAULT now(),
+      updated_at            TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (exam_form_id, subject_key)
+    );
+  `)
+
   // Exam fees per class/level (admin-configurable)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS exam_fees (
@@ -477,7 +501,8 @@ app.delete('/api/admin/exam-sessions/:year', auth('admin'), async (req, res) => 
 app.get('/api/admin/exams', auth('admin'), async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT e.*, s.full_name, s.current_class, s.photo, s.co_name, s.dob
+      SELECT e.*, s.full_name, s.current_class, s.photo, s.co_name, s.dob,
+             s.status AS student_status
       FROM exam_forms e JOIN students s ON s.id = e.student_id
       ORDER BY e.created_at DESC
     `)
@@ -560,6 +585,143 @@ app.patch('/api/admin/exams/:id/attendance', auth('admin'), async (req, res) => 
     res.json({ exam: rows[0] })
   } catch (e) {
     console.error('PATCH /api/admin/exams attendance:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+/* ------------------------------------------------------- Result routes */
+
+// List saved results with the candidate and exam details needed by the admin.
+app.get('/api/admin/results', auth('admin'), async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT r.*, e.roll_no, e.reg_no, e.exam_class, e.exam_year,
+             e.center_code, e.center_name, s.full_name, s.co_name
+      FROM exam_results r
+      JOIN exam_forms e ON e.id = r.exam_form_id
+      JOIN students s ON s.id = e.student_id
+      ORDER BY r.updated_at DESC, r.id DESC
+    `)
+    res.json({ results: rows })
+  } catch (e) {
+    console.error('GET /api/admin/results:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Create or update a subject result. Only approved students marked present are
+// eligible; all derived values are calculated on the server before saving.
+app.post('/api/admin/results', auth('admin'), async (req, res) => {
+  const b = req.body || {}
+  const examId = Number(b.examId)
+  const subject = String(b.subject || '').trim().replace(/\s+/g, ' ')
+  const grade = String(b.grade || '').trim().toUpperCase()
+  const allowedGrades = ['F', 'D', 'B', 'A', 'E', 'O']
+
+  if (!Number.isInteger(examId) || examId < 1)
+    return res.status(400).json({ error: 'A valid student exam record is required' })
+  if (!subject)
+    return res.status(400).json({ error: 'Subject is required' })
+  if (subject.length > 120)
+    return res.status(400).json({ error: 'Subject must be 120 characters or fewer' })
+  if (!allowedGrades.includes(grade))
+    return res.status(400).json({ error: 'Grade must be F, D, B, A, E or O' })
+
+  const markFields = [
+    ['Sectional obtained marks', b.sectionalObtained],
+    ['Sectional total marks', b.sectionalTotal],
+    ['Practical obtained marks', b.practicalObtained],
+    ['Practical total marks', b.practicalTotal],
+    ['Theory obtained marks', b.theoryObtained],
+    ['Theory total marks', b.theoryTotal],
+  ]
+  for (const [label, value] of markFields) {
+    if (value === '' || value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0)
+      return res.status(400).json({ error: `${label} must be a non-negative number` })
+    if (Number(value) > 999999.99)
+      return res.status(400).json({ error: `${label} is too large` })
+  }
+
+  const sectionalObtained = Number(b.sectionalObtained)
+  const sectionalTotal = Number(b.sectionalTotal)
+  const practicalObtained = Number(b.practicalObtained)
+  const practicalTotal = Number(b.practicalTotal)
+  const theoryObtained = Number(b.theoryObtained)
+  const theoryTotal = Number(b.theoryTotal)
+
+  if (sectionalTotal <= 0 || practicalTotal <= 0 || theoryTotal <= 0)
+    return res.status(400).json({ error: 'Total marks for every paper must be greater than zero' })
+  if (sectionalObtained > sectionalTotal || practicalObtained > practicalTotal || theoryObtained > theoryTotal)
+    return res.status(400).json({ error: 'Obtained marks cannot be greater than total marks' })
+
+  try {
+    const eligible = await pool.query(
+      `SELECT e.id
+       FROM exam_forms e JOIN students s ON s.id = e.student_id
+       WHERE e.id=$1 AND e.status='approved' AND e.attendance='present' AND s.status='approved'`,
+      [examId]
+    )
+    if (!eligible.rows.length)
+      return res.status(400).json({ error: 'Results can only be entered for approved students marked present' })
+
+    const totalObtained = sectionalObtained + practicalObtained + theoryObtained
+    const totalMarks = sectionalTotal + practicalTotal + theoryTotal
+    const percentage = Math.round((totalObtained / totalMarks) * 10000) / 100
+    const subjectKey = subject.toLocaleLowerCase('en-IN')
+
+    const saved = await pool.query(`
+      INSERT INTO exam_results
+        (exam_form_id, subject, subject_key, sectional_obtained, sectional_total,
+         practical_obtained, practical_total, theory_obtained, theory_total,
+         total_obtained, total_marks, percentage, grade)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      ON CONFLICT (exam_form_id, subject_key) DO UPDATE SET
+        subject=EXCLUDED.subject,
+        sectional_obtained=EXCLUDED.sectional_obtained,
+        sectional_total=EXCLUDED.sectional_total,
+        practical_obtained=EXCLUDED.practical_obtained,
+        practical_total=EXCLUDED.practical_total,
+        theory_obtained=EXCLUDED.theory_obtained,
+        theory_total=EXCLUDED.theory_total,
+        total_obtained=EXCLUDED.total_obtained,
+        total_marks=EXCLUDED.total_marks,
+        percentage=EXCLUDED.percentage,
+        grade=EXCLUDED.grade,
+        updated_at=now()
+      RETURNING id
+    `, [examId, subject, subjectKey, sectionalObtained, sectionalTotal,
+        practicalObtained, practicalTotal, theoryObtained, theoryTotal,
+        totalObtained, totalMarks, percentage, grade])
+
+    const { rows } = await pool.query(`
+      SELECT r.*, e.roll_no, e.reg_no, e.exam_class, e.exam_year,
+             e.center_code, e.center_name, s.full_name, s.co_name
+      FROM exam_results r
+      JOIN exam_forms e ON e.id = r.exam_form_id
+      JOIN students s ON s.id = e.student_id
+      WHERE r.id=$1
+    `, [saved.rows[0].id])
+    res.json({ result: rows[0] })
+  } catch (e) {
+    console.error('POST /api/admin/results:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Students can view only their own saved subject results.
+app.get('/api/student/results', auth('student'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT r.*, e.roll_no, e.reg_no, e.exam_class, e.exam_year,
+             e.center_code, e.center_name
+      FROM exam_results r
+      JOIN exam_forms e ON e.id = r.exam_form_id
+      WHERE e.student_id=$1
+      ORDER BY e.exam_year DESC, r.subject
+    `, [req.user.id])
+    res.json({ results: rows })
+  } catch (e) {
+    console.error('GET /api/student/results:', e.message)
     res.status(500).json({ error: e.message })
   }
 })

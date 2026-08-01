@@ -15,6 +15,24 @@ const api = async (path, { method = 'GET', body, token } = {}) => {
 
 const EMPTY = { fullName: '', coName: '', phone: '', email: '', aadhaar: '', dob: '', gender: '', address: '', currentClass: '', photo: '' }
 const CLASSES = ['PP1', 'PP2', 'PP3', 'PP4', '1st Year', '2nd Year', '3rd Year Diploma', 'Bisharad', 'Ratna']
+const RESULT_GRADES = [
+  ['F', 'Fail'],
+  ['D', 'Poor'],
+  ['B', 'Average'],
+  ['A', 'Good'],
+  ['E', 'Excellent'],
+  ['O', 'Outstanding'],
+]
+const RESULT_GRADE_LABELS = Object.fromEntries(RESULT_GRADES)
+
+function ResultGrade({ grade }) {
+  return (
+    <span className={`result-grade-badge result-grade-badge--${String(grade).toLowerCase()}`}>
+      <strong>{grade}</strong>
+      <small>{RESULT_GRADE_LABELS[grade] || ''}</small>
+    </span>
+  )
+}
 
 // Exam year sessions 2025-2026 .. 2099-2100
 const EXAM_YEARS = Array.from({ length: 75 }, (_, i) => `${2025 + i}-${2026 + i}`)
@@ -567,6 +585,86 @@ function ExamForm({ session, mode, fixedStudent }) {
   )
 }
 
+function ResultMarksModal({ exam, subject, existing, onClose, onSave, busy }) {
+  const [marks, setMarks] = useState({
+    sectionalObtained: existing?.sectional_obtained ?? '',
+    sectionalTotal: existing?.sectional_total ?? '',
+    practicalObtained: existing?.practical_obtained ?? '',
+    practicalTotal: existing?.practical_total ?? '',
+    theoryObtained: existing?.theory_obtained ?? '',
+    theoryTotal: existing?.theory_total ?? '',
+    grade: existing?.grade || '',
+  })
+
+  const set = key => e => setMarks(p => ({ ...p, [key]: e.target.value }))
+  const value = key => {
+    const n = Number(marks[key])
+    return Number.isFinite(n) ? n : 0
+  }
+  const totalObtained = value('sectionalObtained') + value('practicalObtained') + value('theoryObtained')
+  const totalMarks = value('sectionalTotal') + value('practicalTotal') + value('theoryTotal')
+  const percentage = totalMarks > 0 ? (totalObtained / totalMarks) * 100 : 0
+  const invalid = [
+    ['sectionalObtained', 'sectionalTotal'],
+    ['practicalObtained', 'practicalTotal'],
+    ['theoryObtained', 'theoryTotal'],
+  ].some(([obtained, total]) => marks[obtained] === '' || marks[total] === '' || value(total) <= 0 || value(obtained) > value(total))
+
+  const submit = e => {
+    e.preventDefault()
+    onSave({ ...marks, examId: exam.id })
+  }
+
+  return (
+    <div className="result-modal" onClick={onClose} role="dialog" aria-modal="true" aria-label="Enter result marks">
+      <form className="result-modal__card" onSubmit={submit} onClick={e => e.stopPropagation()}>
+        <button type="button" className="result-modal__close" onClick={onClose} aria-label="Close marks entry">×</button>
+        <div className="result-modal__head">
+          <span className="eyebrow">Marks Entry</span>
+          <h2>{existing ? 'Update Result' : 'Process Result'}</h2>
+          <p>{exam.full_name} · Roll {exam.roll_no} · {exam.exam_class} · {subject}</p>
+        </div>
+
+        <div className="result-marks-grid result-marks-grid--head">
+          <strong>Paper</strong><strong>Obtained</strong><strong>Total</strong>
+        </div>
+        {[
+          ['Sectional Paper', 'sectionalObtained', 'sectionalTotal'],
+          ['Practical Paper', 'practicalObtained', 'practicalTotal'],
+          ['Theory Paper', 'theoryObtained', 'theoryTotal'],
+        ].map(([label, obtained, total]) => (
+          <div className="result-marks-grid" key={label}>
+            <label>{label}</label>
+            <input type="number" min="0" step="0.01" value={marks[obtained]} onChange={set(obtained)} required aria-label={`${label} obtained marks`} />
+            <input type="number" min="0.01" step="0.01" value={marks[total]} onChange={set(total)} required aria-label={`${label} total marks`} />
+          </div>
+        ))}
+
+        <div className="result-totals">
+          <div><small>Total Obtained</small><strong>{totalObtained.toFixed(2)}</strong></div>
+          <div><small>Total Marks</small><strong>{totalMarks.toFixed(2)}</strong></div>
+          <div><small>Percentage</small><strong>{percentage.toFixed(2)}%</strong></div>
+        </div>
+
+        <label className="result-grade">Grade
+          <select value={marks.grade} onChange={set('grade')} required>
+            <option value="">Select grade</option>
+            {RESULT_GRADES.map(([grade, label]) => <option key={grade} value={grade}>{grade} - {label}</option>)}
+          </select>
+        </label>
+
+        {invalid && totalMarks > 0 && <p className="auth__err">Each obtained mark must be less than or equal to its paper total.</p>}
+        <div className="result-modal__actions">
+          <button type="button" className="btn btn--ghost-dark" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn" disabled={busy || invalid || !marks.grade}>
+            {busy ? 'Saving…' : 'Save Result'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 /* ─── Admin Dashboard ───────────────────────────────────────────────────── */
 function AdminDashboard({ session, onLogout }) {
   const { notify } = useNotification()
@@ -591,6 +689,11 @@ function AdminDashboard({ session, onLogout }) {
   const [relDatetime, setRelDatetime] = useState('')
   const [relYear, setRelYear] = useState('')
   const [relMsg, setRelMsg] = useState('')
+  const [results, setResults] = useState([])
+  const [resultYear, setResultYear] = useState('')
+  const [resultExamId, setResultExamId] = useState('')
+  const [resultSubject, setResultSubject] = useState('')
+  const [resultModal, setResultModal] = useState(null)
 
   useEffect(() => {
     if (err) notify({ type: 'error', title: 'Action failed', message: err })
@@ -626,10 +729,17 @@ function AdminDashboard({ session, onLogout }) {
       .catch(() => {})
   }
 
+  const loadResults = () => {
+    api('/api/admin/results', { token: session.token })
+      .then(d => setResults(d.results))
+      .catch(e => setErr(e.message))
+  }
+
   useEffect(() => { if (page === 'students' || page === 'home') load() }, [page])
-  useEffect(() => { if (page === 'exams' || page === 'attendance') loadExams() }, [page])
-  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit' || page === 'attendance') loadSessions() }, [page])
+  useEffect(() => { if (page === 'exams' || page === 'attendance' || page === 'results') loadExams() }, [page])
+  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit' || page === 'attendance' || page === 'results') loadSessions() }, [page])
   useEffect(() => { if (page === 'fees') loadFees() }, [page])
+  useEffect(() => { if (page === 'results') loadResults() }, [page])
 
   const openSession = async () => {
     if (!newYear) return
@@ -780,6 +890,22 @@ function AdminDashboard({ session, onLogout }) {
     } catch (e) { setErr(e.message) }
   }
 
+  const saveResult = async marks => {
+    setErr(''); setBusy(true)
+    try {
+      await api('/api/admin/results', {
+        method: 'POST',
+        token: session.token,
+        body: { ...marks, subject: resultSubject.trim() },
+      })
+      notify({ type: 'success', title: 'Result saved', message: `${resultSubject.trim()} marks were saved successfully.` })
+      setResultModal(null)
+      setResultSubject('')
+      loadResults()
+    } catch (e) { setErr(e.message) }
+    finally { setBusy(false) }
+  }
+
   const filtered = students.filter(s =>
     !search || s.full_name.toLowerCase().includes(search.toLowerCase()) ||
     s.aadhaar?.includes(search) || s.phone?.includes(search) || s.reg_no?.includes(search)
@@ -795,6 +921,7 @@ function AdminDashboard({ session, onLogout }) {
     { id: 'fees', icon: '💰', label: 'Exam Fees' },
     { id: 'admit', icon: '🎟️', label: 'Admit Release' },
     { id: 'attendance', icon: '✅', label: 'Attendance' },
+    { id: 'results', icon: '🏆', label: 'Results' },
   ]
 
   return (
@@ -840,6 +967,7 @@ function AdminDashboard({ session, onLogout }) {
             {page === 'exam-new' && 'New Exam Form'}
             {page === 'admit' && 'Admit Release'}
             {page === 'attendance' && 'Attendance'}
+            {page === 'results' && 'Student Results'}
           </h1>
           <span className="ds-topbar__user">👤 {session.user.adminId}</span>
         </header>
@@ -1217,6 +1345,107 @@ function AdminDashboard({ session, onLogout }) {
               </div>
             )
           })()}
+
+          {page === 'results' && (() => {
+            const eligible = exams.filter(e =>
+              e.status === 'approved' &&
+              e.student_status === 'approved' &&
+              e.attendance === 'present' &&
+              (!resultYear || e.exam_year === resultYear)
+            )
+            const selectedExam = eligible.find(e => String(e.id) === String(resultExamId))
+            const selectedResult = selectedExam && resultSubject.trim()
+              ? results.find(r => r.exam_form_id === selectedExam.id && r.subject.toLowerCase() === resultSubject.trim().toLowerCase())
+              : null
+
+            return (
+              <div className="results-page">
+                <div className="reg-form result-entry">
+                  <div className="reg-form__header">
+                    <h2>Enter Student Result</h2>
+                    <p>Only approved students whose approved exam attendance is marked Present appear here.</p>
+                  </div>
+                  {err && <p className="auth__err">{err}</p>}
+                  <div className="reg-form__grid">
+                    <label>Exam Year
+                      <select value={resultYear} onChange={e => { setResultYear(e.target.value); setResultExamId('') }}>
+                        <option value="">All sessions</option>
+                        {[...new Set(exams.map(e => e.exam_year))].filter(Boolean).sort().map(y => <option key={y}>{y}</option>)}
+                      </select>
+                    </label>
+                    <label>Student Name *
+                      <select value={resultExamId} onChange={e => setResultExamId(e.target.value)} required>
+                        <option value="">Select approved present student</option>
+                        {eligible.map(e => <option key={e.id} value={e.id}>{e.full_name} · Roll {e.roll_no}</option>)}
+                      </select>
+                    </label>
+                  </div>
+
+                  {selectedExam && (
+                    <>
+                      <div className="result-autofill">
+                        <div><small>Student Name</small><strong>{selectedExam.full_name}</strong></div>
+                        <div><small>Roll Number</small><strong>{selectedExam.roll_no}</strong></div>
+                        <div><small>C/O Name</small><strong>{selectedExam.co_name || '—'}</strong></div>
+                        <div><small>Examination Class</small><strong>{selectedExam.exam_class}</strong></div>
+                        <div><small>Center Name</small><strong>{selectedExam.center_name}</strong></div>
+                        <div><small>Center Code</small><strong>{selectedExam.center_code}</strong></div>
+                      </div>
+                      <div className="result-subject-row">
+                        <label>Subject *
+                          <input value={resultSubject} onChange={e => setResultSubject(e.target.value)} placeholder="Enter subject name" maxLength={120} />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={!resultSubject.trim()}
+                          onClick={() => setResultModal({ exam: selectedExam, existing: selectedResult })}>
+                          {selectedResult ? 'Update Marks' : 'Process Marks'}
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {!eligible.length && <p className="ds-empty">No approved students marked present{resultYear && ` for ${resultYear}`}.</p>}
+                </div>
+
+                <div className="result-list">
+                  <h3>Saved Results ({results.length})</h3>
+                  <div className="ds-table-wrap">
+                    <table className="ds-table">
+                      <thead><tr><th>Roll No</th><th>Name</th><th>Subject</th><th>Class</th><th>Obtained</th><th>Total</th><th>Percentage</th><th>Grade</th></tr></thead>
+                      <tbody>
+                        {results.length === 0 && <tr><td colSpan="8" className="ds-empty-cell">No results saved yet.</td></tr>}
+                        {results.map(r => (
+                          <tr key={r.id}>
+                            <td><strong>{r.roll_no}</strong></td>
+                            <td>{r.full_name}</td>
+                            <td>{r.subject}</td>
+                            <td>{r.exam_class}</td>
+                            <td>{Number(r.total_obtained).toFixed(2)}</td>
+                            <td>{Number(r.total_marks).toFixed(2)}</td>
+                            <td>{Number(r.percentage).toFixed(2)}%</td>
+                            <td><ResultGrade grade={r.grade} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {resultModal && (
+                  <ResultMarksModal
+                    exam={resultModal.exam}
+                    subject={resultSubject.trim()}
+                    existing={resultModal.existing}
+                    busy={busy}
+                    onClose={() => setResultModal(null)}
+                    onSave={saveResult}
+                  />
+                )}
+              </div>
+            )
+          })()}
         </div>
       </div>
     </div>
@@ -1231,6 +1460,7 @@ function StudentDashboard({ session, onLogout }) {
   const [exams, setExams] = useState([])
   const [openYears, setOpenYears] = useState([])
   const [admitIdx, setAdmitIdx] = useState(0)
+  const [results, setResults] = useState([])
 
   useEffect(() => {
     api('/api/student/me', { token: session.token })
@@ -1244,8 +1474,15 @@ function StudentDashboard({ session, onLogout }) {
       .catch(() => {})
   }
 
+  const loadResults = () => {
+    api('/api/student/results', { token: session.token })
+      .then(d => setResults(d.results))
+      .catch(() => {})
+  }
+
   useEffect(() => { if (page === 'exams' || page === 'exam' || page === 'admit') loadExams() }, [page])
   useEffect(() => { if (page === 'exam') api('/api/exam-sessions').then(d => setOpenYears(d.sessions)).catch(() => {}) }, [page])
+  useEffect(() => { if (page === 'results') loadResults() }, [page])
 
   // Open years the student has not yet filled
   const availableYears = openYears.filter(y => !exams.some(e => e.exam_year === y))
@@ -1260,9 +1497,10 @@ function StudentDashboard({ session, onLogout }) {
     { id: 'exam', icon: '📝', label: 'Exam Fillup' },
     { id: 'exams', icon: '📋', label: 'My Exam Forms' },
     { id: 'admit', icon: '🎟️', label: 'Admit Card' },
+    { id: 'results', icon: '🏆', label: 'My Results' },
   ]
 
-  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', admit: 'Admit Card' }
+  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', admit: 'Admit Card', results: 'My Results' }
 
   return (
     <div className="ds-layout">
@@ -1395,6 +1633,36 @@ function StudentDashboard({ session, onLogout }) {
               </div>
             )
           })()}
+
+          {page === 'results' && (
+            <div className="student-results">
+              {results.length === 0 ? (
+                <div className="ds-empty">No result has been published for you yet.</div>
+              ) : (
+                <div className="ds-table-wrap">
+                  <table className="ds-table">
+                    <thead><tr><th>Session</th><th>Roll No</th><th>Subject</th><th>Class</th><th>Sectional</th><th>Practical</th><th>Theory</th><th>Total</th><th>Percentage</th><th>Grade</th></tr></thead>
+                    <tbody>
+                      {results.map(r => (
+                        <tr key={r.id}>
+                          <td>{r.exam_year}</td>
+                          <td><strong>{r.roll_no}</strong></td>
+                          <td>{r.subject}</td>
+                          <td>{r.exam_class}</td>
+                          <td>{Number(r.sectional_obtained).toFixed(2)} / {Number(r.sectional_total).toFixed(2)}</td>
+                          <td>{Number(r.practical_obtained).toFixed(2)} / {Number(r.practical_total).toFixed(2)}</td>
+                          <td>{Number(r.theory_obtained).toFixed(2)} / {Number(r.theory_total).toFixed(2)}</td>
+                          <td>{Number(r.total_obtained).toFixed(2)} / {Number(r.total_marks).toFixed(2)}</td>
+                          <td>{Number(r.percentage).toFixed(2)}%</td>
+                          <td><ResultGrade grade={r.grade} /></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
