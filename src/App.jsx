@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import Logo from './components/Logo.jsx'
 import Admission, { PublicRegister } from './components/Admission.jsx'
+import { useNotification } from './components/NotificationBanner.jsx'
 
 const NAV = [
   { id: 'home', label: 'Home' },
@@ -320,6 +321,7 @@ function Board() {
 
 function Contact() {
   const [sent, setSent] = useState(false)
+  const { notify } = useNotification()
   return (
     <section id="contact" className="section section--tint">
       <div className="container contact">
@@ -342,6 +344,11 @@ function Contact() {
           onSubmit={(e) => {
             e.preventDefault()
             setSent(true)
+            notify({
+              type: 'success',
+              title: 'Enquiry received',
+              message: 'Thank you — the academy team will contact you soon.',
+            })
           }}
         >
           {sent ? (

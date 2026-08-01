@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import Logo from './Logo.jsx'
+import { useNotification } from './NotificationBanner.jsx'
 
 const api = async (path, { method = 'GET', body, token } = {}) => {
   const res = await fetch(path, {
@@ -374,6 +375,7 @@ function AdmitCard({ e }) {
 /* ─── Exam Form ─────────────────────────────────────────────────────────── */
 // mode: 'admin' (lookup by reg no) | 'student' (own reg no locked)
 function ExamForm({ session, mode, fixedStudent }) {
+  const { notify } = useNotification()
   const [regNo, setRegNo] = useState(fixedStudent?.reg_no || '')
   const [student, setStudent] = useState(fixedStudent || null)
   const [lookupErr, setLookupErr] = useState('')
@@ -422,7 +424,10 @@ function ExamForm({ session, mode, fixedStudent }) {
       const d = await api(`/api/admin/lookup/${encodeURIComponent(regNo.trim())}`, { token: session.token })
       setStudent(d.student)
       setExamClass(d.student.current_class || '')
-    } catch (e) { setLookupErr(e.message) } finally { setLooking(false) }
+    } catch (e) {
+      setLookupErr(e.message)
+      notify({ type: 'error', title: 'Student not found', message: e.message })
+    } finally { setLooking(false) }
   }
 
   const submit = async e => {
@@ -432,7 +437,11 @@ function ExamForm({ session, mode, fixedStudent }) {
       const body = { regNo, examClass, examYear, centerCode, centerName }
       const d = await api(path, { method: 'POST', body, token: session.token })
       setResult(d.exam)
-    } catch (e) { setErr(e.message) } finally { setBusy(false) }
+      notify({ type: 'success', title: 'Exam form submitted', message: `Roll number ${d.exam.roll_no} was generated successfully.` })
+    } catch (e) {
+      setErr(e.message)
+      notify({ type: 'error', title: 'Submission failed', message: e.message })
+    } finally { setBusy(false) }
   }
 
   if (result) return (
@@ -560,6 +569,7 @@ function ExamForm({ session, mode, fixedStudent }) {
 
 /* ─── Admin Dashboard ───────────────────────────────────────────────────── */
 function AdminDashboard({ session, onLogout }) {
+  const { notify } = useNotification()
   const [page, setPage] = useState('home') // home | students | register | detail | edit | exams
   const [students, setStudents] = useState([])
   const [selected, setSelected] = useState(null)
@@ -581,6 +591,10 @@ function AdminDashboard({ session, onLogout }) {
   const [relDatetime, setRelDatetime] = useState('')
   const [relYear, setRelYear] = useState('')
   const [relMsg, setRelMsg] = useState('')
+
+  useEffect(() => {
+    if (err) notify({ type: 'error', title: 'Action failed', message: err })
+  }, [err, notify])
 
   const load = () => {
     setLoading(true)
@@ -619,22 +633,33 @@ function AdminDashboard({ session, onLogout }) {
 
   const openSession = async () => {
     if (!newYear) return
-    await api('/api/admin/exam-sessions', { method: 'POST', body: { examYear: newYear }, token: session.token })
-      .catch(e => setErr(e.message))
-    loadSessions()
-    setNewYear('')
+    setErr('')
+    try {
+      await api('/api/admin/exam-sessions', { method: 'POST', body: { examYear: newYear }, token: session.token })
+      notify({ type: 'success', title: 'Exam session opened', message: `${newYear} is now available for exam fill-up.` })
+      loadSessions()
+      setNewYear('')
+    } catch (e) { setErr(e.message) }
   }
 
   const closeSession = async year => {
     if (!confirm(`Close exam session ${year}?`)) return
-    await fetch(`/api/admin/exam-sessions/${encodeURIComponent(year)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}` } })
-    loadSessions()
+    setErr('')
+    try {
+      await api(`/api/admin/exam-sessions/${encodeURIComponent(year)}`, { method: 'DELETE', token: session.token })
+      notify({ type: 'success', title: 'Exam session closed', message: `${year} is no longer open for new forms.` })
+      loadSessions()
+    } catch (e) { setErr(e.message) }
   }
 
   const delExam = async id => {
     if (!confirm('Delete this exam form?')) return
-    await fetch(`/api/admin/exams/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}` } })
-    loadExams()
+    setErr('')
+    try {
+      await api(`/api/admin/exams/${id}`, { method: 'DELETE', token: session.token })
+      notify({ type: 'success', title: 'Exam form deleted', message: 'The exam form was removed.' })
+      loadExams()
+    } catch (e) { setErr(e.message) }
   }
 
   const saveFee = async examClass => {
@@ -642,6 +667,7 @@ function AdminDashboard({ session, onLogout }) {
     try {
       await api('/api/admin/exam-fees', { method: 'POST', body: { examClass, fee: fees[examClass] || 0 }, token: session.token })
       setFeeSaved(examClass)
+      notify({ type: 'success', title: 'Fee saved', message: `${examClass} examination fee was updated.` })
       setTimeout(() => setFeeSaved(''), 2000)
     } catch (e) { setErr(e.message) }
   }
@@ -654,6 +680,7 @@ function AdminDashboard({ session, onLogout }) {
           await api('/api/admin/exam-fees', { method: 'POST', body: { examClass: c, fee: fees[c] || 0 }, token: session.token })
       }
       setFeeSaved('all')
+      notify({ type: 'success', title: 'Fees saved', message: 'All examination fees were updated.' })
       setTimeout(() => setFeeSaved(''), 2000)
     } catch (e) { setErr(e.message) }
   }
@@ -663,6 +690,7 @@ function AdminDashboard({ session, onLogout }) {
       const d = await api(`/api/admin/students/${id}/status`, { method: 'PATCH', body: { status }, token: session.token })
       setStudents(p => p.map(s => s.id === id ? d.student : s))
       if (selected?.id === id) setSelected(d.student)
+      notify({ type: 'success', title: 'Student status updated', message: `Registration marked ${status}.` })
     } catch (e) { setErr(e.message) }
   }
 
@@ -670,6 +698,7 @@ function AdminDashboard({ session, onLogout }) {
     try {
       const d = await api(`/api/admin/exams/${id}/status`, { method: 'PATCH', body: { status }, token: session.token })
       setExams(p => p.map(e => e.id === id ? d.exam : e))
+      notify({ type: 'success', title: 'Exam status updated', message: `Exam form marked ${status}.` })
     } catch (e) { setErr(e.message) }
   }
 
@@ -677,6 +706,7 @@ function AdminDashboard({ session, onLogout }) {
     try {
       const d = await api(`/api/admin/exams/${id}/payment`, { method: 'PATCH', body: { paymentStatus }, token: session.token })
       setExams(p => p.map(e => e.id === id ? d.exam : e))
+      notify({ type: 'success', title: 'Payment updated', message: `Exam fee marked ${paymentStatus}.` })
     } catch (e) { setErr(e.message) }
   }
 
@@ -687,6 +717,11 @@ function AdminDashboard({ session, onLogout }) {
     try {
       const d = await api(`/api/admin/exams/${id}/attendance`, { method: 'PATCH', body: { attendance: value }, token: session.token })
       setExams(p => p.map(e => e.id === id ? { ...e, ...d.exam } : e))
+      notify({
+        type: 'success',
+        title: 'Attendance updated',
+        message: value ? `Student marked ${value}.` : 'Attendance mark was cleared.',
+      })
     } catch (e) { setErr(e.message) }
   }
 
@@ -695,6 +730,11 @@ function AdminDashboard({ session, onLogout }) {
     try {
       const d = await api(`/api/admin/exams/${id}/admit`, { method: 'PATCH', body: { released }, token: session.token })
       setExams(p => p.map(e => e.id === id ? d.exam : e))
+      notify({
+        type: 'success',
+        title: released ? 'Admit card released' : 'Admit card withdrawn',
+        message: released ? 'The student can now view the admit card.' : 'The admit card is no longer visible to the student.',
+      })
     } catch (e) { setErr(e.message) }
   }
 
@@ -707,6 +747,7 @@ function AdminDashboard({ session, onLogout }) {
       else if (relYear.trim()) body.examYear = relYear.trim()
       const d = await api('/api/admin/exams/release', { method: 'POST', body, token: session.token })
       setRelMsg(`Released ${d.released} admit card(s).`)
+      notify({ type: 'success', title: 'Admit cards released', message: `Released ${d.released} admit card(s).` })
       loadExams()
     } catch (e) { setErr(e.message) }
     finally { setBusy(false) }
@@ -719,18 +760,24 @@ function AdminDashboard({ session, onLogout }) {
     try {
       if (page === 'register') {
         await api('/api/admin/students', { method: 'POST', body: f, token: session.token })
+        notify({ type: 'success', title: 'Student registered', message: 'The student record was added successfully.' })
         nav('students')
       } else {
         const d = await api(`/api/admin/students/${selected.id}`, { method: 'PUT', body: f, token: session.token })
         setSelected(d.student); nav('detail')
+        notify({ type: 'success', title: 'Student updated', message: 'The student record was updated successfully.' })
       }
     } catch (e) { setErr(e.message) } finally { setBusy(false) }
   }
 
   const del = async id => {
     if (!confirm('Delete this student record permanently?')) return
-    await fetch(`/api/admin/students/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${session.token}` } })
-    load(); nav('students')
+    setErr('')
+    try {
+      await api(`/api/admin/students/${id}`, { method: 'DELETE', token: session.token })
+      load(); nav('students')
+      notify({ type: 'success', title: 'Student deleted', message: 'The student record was removed.' })
+    } catch (e) { setErr(e.message) }
   }
 
   const filtered = students.filter(s =>
@@ -1360,10 +1407,14 @@ function AdminLogin({ onSuccess }) {
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const { notify } = useNotification()
   const submit = async e => {
     e.preventDefault(); setErr(''); setBusy(true)
-    try { const d = await api('/api/admin/login', { method: 'POST', body: { adminId, password } }); onSuccess({ token: d.token, user: d.user, role: 'admin' }) }
-    catch (e) { setErr(e.message) } finally { setBusy(false) }
+    try { const d = await api('/api/admin/login', { method: 'POST', body: { adminId, password } }); notify({ type: 'success', title: 'Welcome back', message: 'Admin portal login successful.' }); onSuccess({ token: d.token, user: d.user, role: 'admin' }) }
+    catch (e) {
+      setErr(e.message)
+      notify({ type: 'error', title: 'Login failed', message: e.message })
+    } finally { setBusy(false) }
   }
   return (
     <form className="auth__form" onSubmit={submit}>
@@ -1382,10 +1433,14 @@ function StudentLogin({ onSuccess }) {
   const [dob, setDob] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const { notify } = useNotification()
   const submit = async e => {
     e.preventDefault(); setErr(''); setBusy(true)
-    try { const d = await api('/api/student/login', { method: 'POST', body: { aadhaar, dob } }); onSuccess({ token: d.token, user: d.user, role: 'student' }) }
-    catch (e) { setErr(e.message) } finally { setBusy(false) }
+    try { const d = await api('/api/student/login', { method: 'POST', body: { aadhaar, dob } }); notify({ type: 'success', title: 'Welcome', message: `Signed in as ${d.user.full_name}.` }); onSuccess({ token: d.token, user: d.user, role: 'student' }) }
+    catch (e) {
+      setErr(e.message)
+      notify({ type: 'error', title: 'Login failed', message: e.message })
+    } finally { setBusy(false) }
   }
   return (
     <form className="auth__form" onSubmit={submit}>
@@ -1403,12 +1458,15 @@ function StudentLogin({ onSuccess }) {
 function ShareLink() {
   const link = `${window.location.origin}/register`
   const [copied, setCopied] = useState(false)
+  const { notify } = useNotification()
   const msg = `Register for The Indian Music & Fine Art Academy: ${link}`
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(link) }
     catch { /* fallback */ const t = document.createElement('textarea'); t.value = link; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove() }
-    setCopied(true); setTimeout(() => setCopied(false), 2000)
+    setCopied(true)
+    notify({ type: 'success', title: 'Link copied', message: 'The public registration link is ready to share.' })
+    setTimeout(() => setCopied(false), 2000)
   }
 
   return (
@@ -1438,6 +1496,7 @@ export function PublicRegister() {
   const [err, setErr] = useState('')
   const [done, setDone] = useState(null)   // { regNo }
   const [dupRegNo, setDupRegNo] = useState('')
+  const { notify } = useNotification()
 
   const save = async f => {
     setErr(''); setDupRegNo(''); setBusy(true)
@@ -1448,14 +1507,26 @@ export function PublicRegister() {
       })
       const data = await res.json().catch(() => ({}))
       if (res.status === 409) {
-        if (data.regNo) setDupRegNo(data.regNo)
-        else setErr(data.error || 'This Aadhaar number is already registered.')
+        if (data.regNo) {
+          setDupRegNo(data.regNo)
+          notify({ type: 'warning', title: 'Already registered', message: `Existing registration number: ${data.regNo}.` })
+        }
+        else {
+          setErr(data.error || 'This Aadhaar number is already registered.')
+          notify({ type: 'warning', title: 'Already registered', message: data.error || 'This Aadhaar number is already registered.' })
+        }
         return
       }
-      if (!res.ok) { setErr(data.error || 'Something went wrong'); return }
+      if (!res.ok) {
+        setErr(data.error || 'Something went wrong')
+        notify({ type: 'error', title: 'Registration failed', message: data.error || 'Something went wrong.' })
+        return
+      }
       setDone({ regNo: data.regNo })
+      notify({ type: 'success', title: 'Registration successful', message: `Your registration number is ${data.regNo}.` })
     } catch {
       setErr('Network error — please try again.')
+      notify({ type: 'error', title: 'Network error', message: 'Please check your connection and try again.' })
     } finally { setBusy(false) }
   }
 
@@ -1501,6 +1572,7 @@ export function PublicRegister() {
 export default function Admission({ open, onClose }) {
   const [tab, setTab] = useState('student')
   const [session, setSession] = useState(null)
+  const { notify } = useNotification()
 
   useEffect(() => {
     const saved = localStorage.getItem('ifaa_session')
@@ -1508,7 +1580,11 @@ export default function Admission({ open, onClose }) {
   }, [])
 
   const login = s => { setSession(s); localStorage.setItem('ifaa_session', JSON.stringify(s)) }
-  const logout = () => { setSession(null); localStorage.removeItem('ifaa_session') }
+  const logout = () => {
+    setSession(null)
+    localStorage.removeItem('ifaa_session')
+    notify({ type: 'info', title: 'Signed out', message: 'You have been logged out safely.' })
+  }
 
   // Full-screen dashboard when logged in
   if (session) {
