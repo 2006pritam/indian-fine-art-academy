@@ -44,6 +44,55 @@ const sessionFromDate = d => {
 }
 // Card number derived from the reg no, e.g. IMFAA-2026-0001 -> RC-20260001
 const cardNoFromReg = reg => (reg ? `RC-${(reg.match(/\d+/g) || []).join('')}` : '—')
+const maskAadhaar = value => {
+  const digits = String(value || '').replace(/\D/g, '')
+  return digits.length === 12 ? `XXXX XXXX ${digits.slice(-4)}` : (value || '—')
+}
+const formatCardDate = value => {
+  if (!value) return '—'
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+// Opens the browser's reliable Save as PDF dialog with a useful filename.
+function printCard(id, filename) {
+  const source = document.getElementById(id)
+  if (!source) return
+  document.querySelectorAll('.print-card-root').forEach(node => node.remove())
+  document.querySelectorAll('.print-page-style').forEach(node => node.remove())
+  document.body.classList.remove('is-printing-card')
+  const previousTitle = document.title
+  const printRoot = document.createElement('div')
+  printRoot.className = `print-card-root${id === 'marksheet-print' ? ' print-card-root--marksheet' : ''}${id === 'pass-certificate-print' ? ' print-card-root--certificate' : ''}`
+  printRoot.appendChild(source.cloneNode(true))
+  const pageStyle = document.createElement('style')
+  pageStyle.className = 'print-page-style'
+  pageStyle.textContent = id === 'marksheet-print'
+    ? '@page { size: A4 landscape; margin: 0.25in; }'
+    : id === 'pass-certificate-print'
+      ? '@page { size: A4 landscape; margin: 0.2in; }'
+      : '@page { size: A4 portrait; margin: 0.35in; }'
+  document.head.appendChild(pageStyle)
+  document.body.appendChild(printRoot)
+  document.body.classList.add('is-printing-card')
+  document.title = filename
+  let cleaned = false
+  const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
+    document.body.classList.remove('is-printing-card')
+    printRoot.remove()
+    pageStyle.remove()
+    document.title = previousTitle
+    window.removeEventListener('afterprint', cleanup)
+  }
+  window.addEventListener('afterprint', cleanup)
+  window.requestAnimationFrame(() => {
+    window.print()
+    // Some mobile browsers do not dispatch afterprint, so keep a generous fallback.
+    window.setTimeout(cleanup, 300000)
+  })
+}
 
 const STATUS_LABEL = { approved: 'Approved', pending: 'Pending', rejected: 'Rejected' }
 function StatusBadge({ status }) {
@@ -239,8 +288,8 @@ function RegistrationCard({ s }) {
     ['Candidate Name', s.full_name],
     ['C/O Name', s.co_name],
     ['Class / Level', s.current_class],
-    ['Aadhaar Number', s.aadhaar],
-    ['Date of Birth', s.dob],
+    ['Aadhaar Number', maskAadhaar(s.aadhaar)],
+    ['Date of Birth', formatCardDate(s.dob)],
     ['Gender', s.gender],
   ]
 
@@ -248,7 +297,8 @@ function RegistrationCard({ s }) {
     <div className="reg-card-wrap">
       <div className="reg-card" id="reg-card-print">
         <div className="reg-card__note">
-          Note - (This Registration Card must be kept safe for all academy correspondence)
+          <span>Official student record</span>
+          <strong>Keep this card safe for all academy correspondence</strong>
         </div>
 
         <div className="reg-card__body">
@@ -257,11 +307,16 @@ function RegistrationCard({ s }) {
               <Logo size={58} />
               <div>
                 <strong>The Indian Music &amp; Fine Art Academy</strong>
-                <small>West Bengal, India</small>
+                <small>West Bengal, India · Student Registration</small>
               </div>
             </div>
-            <div className="reg-card__photo">
-              {s.photo ? <img src={s.photo} alt={s.full_name} /> : <span>{s.full_name?.[0] || '?'}</span>}
+            <div className="reg-card__head-meta">
+              <span className={`card-status ${s.status === 'approved' ? 'card-status--active' : 'card-status--waiting'}`}>
+                {s.status === 'approved' ? 'Verified record' : 'Registration submitted'}
+              </span>
+              <div className="reg-card__photo">
+                {s.photo ? <img src={s.photo} alt={s.full_name} /> : <span>{s.full_name?.[0] || '?'}</span>}
+              </div>
             </div>
           </div>
 
@@ -304,13 +359,20 @@ function RegistrationCard({ s }) {
             </div>
           </div>
 
-          <p className="reg-card__caption">This is a system generated card — signature not required.</p>
+          <p className="reg-card__caption">System generated registration card · No physical signature required</p>
         </div>
       </div>
 
-      <button className="btn reg-card__print-btn" onClick={() => window.print()}>
-        Print / Download PDF
-      </button>
+      <div className="card-download-panel">
+        <div>
+          <strong>Save your registration card</strong>
+          <span>Choose “Save to PDF” in the print window to download it.</span>
+        </div>
+        <div className="card-download-panel__actions">
+          <button className="btn" onClick={() => printCard('reg-card-print', `IMFAA-Registration-${s.reg_no || 'card'}`)}>Download PDF</button>
+          <button className="btn btn--outline" onClick={() => printCard('reg-card-print', `IMFAA-Registration-${s.reg_no || 'card'}`)}>Print card</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -326,7 +388,7 @@ function AdmitCard({ e }) {
   const rows = [
     ["Student's Name", e.full_name],
     ["Father's / C/O Name", e.co_name],
-    ['Date of Birth', e.dob],
+    ['Date of Birth', formatCardDate(e.dob)],
     ['Examination Centre', e.center_name ? `${e.center_name} (${e.center_code})` : '—'],
     ['Class / Level', e.exam_class],
     ['Session', e.exam_year],
@@ -336,8 +398,14 @@ function AdmitCard({ e }) {
     <div className="admit-card-wrap">
       <div className="admit-card" id="admit-card-print">
         <div className="admit-card__header">
-          <strong>The Indian Music &amp; Fine Art Academy</strong>
-          <small>West Bengal, India</small>
+          <div className="admit-card__header-brand">
+            <Logo size={48} />
+            <div>
+              <strong>The Indian Music &amp; Fine Art Academy</strong>
+              <small>West Bengal, India · Examination Division</small>
+            </div>
+          </div>
+          <span className="card-status card-status--exam">Valid for examination</span>
         </div>
 
         <div className="admit-card__titlerow">
@@ -379,13 +447,230 @@ function AdmitCard({ e }) {
             </svg>
             Digitally Verified
           </span>
-          <p className="admit-card__caption">This is a system generated admit card — signature not required.</p>
+          <p className="admit-card__caption">System generated admit card · Carry this card and a valid photo ID</p>
         </div>
       </div>
 
-      <button className="btn admit-card__print-btn" onClick={() => window.print()}>
-        Print / Download PDF
-      </button>
+      <div className="card-download-panel">
+        <div>
+          <strong>Download your admit card</strong>
+          <span>Choose “Save to PDF” in the print window to keep a copy on your phone.</span>
+        </div>
+        <div className="card-download-panel__actions">
+          <button className="btn" onClick={() => printCard('admit-card-print', `IMFAA-Admit-${e.roll_no || 'card'}`)}>Download PDF</button>
+          <button className="btn btn--outline" onClick={() => printCard('admit-card-print', `IMFAA-Admit-${e.roll_no || 'card'}`)}>Print card</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Marksheet (printable / downloadable) ─────────────────────────────── */
+const formatMark = value => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '0'
+  return Number.isInteger(number) ? String(number) : number.toFixed(2)
+}
+
+function Marksheet({ student, results }) {
+  const first = results[0]
+  const grandObtained = results.reduce((sum, row) => sum + Number(row.total_obtained || 0), 0)
+  const grandTotal = results.reduce((sum, row) => sum + Number(row.total_marks || 0), 0)
+  const overallPercentage = grandTotal > 0 ? (grandObtained / grandTotal) * 100 : 0
+  const failed = results.some(row => String(row.grade).toUpperCase() === 'F')
+  const overallResult = failed ? 'FAIL' : 'PASS'
+  const fileName = `IMFAA-Marksheet-${first.roll_no || student.reg_no || 'result'}-${first.exam_year || ''}`
+
+  const details = [
+    ['Student Name', student.full_name],
+    ['C/O Name', student.co_name],
+    ['Roll Number', first.roll_no],
+    ['Registration No.', first.reg_no || student.reg_no],
+    ['Examination Class', first.exam_class],
+    ['Session', first.exam_year],
+    ['Centre Name', first.center_name],
+    ['Centre Code', first.center_code],
+  ]
+
+  return (
+    <div className="marksheet-wrap">
+      <article className="marksheet" id="marksheet-print">
+        <Logo size={360} className="marksheet__watermark" />
+        <div className="marksheet__content">
+          <header className="marksheet__header">
+            <Logo size={72} />
+            <div className="marksheet__academy">
+              <span>The Indian Music &amp; Fine Art Academy</span>
+              <strong>Statement of Marks</strong>
+              <small>West Bengal, India · Examination Division</small>
+            </div>
+            <div className="marksheet__verified">
+              <span>Verified</span>
+              <small>{first.exam_year}</small>
+            </div>
+          </header>
+
+          <div className="marksheet__titlebar">
+            <span>Academic Marksheet</span>
+            <strong>{first.exam_class}</strong>
+          </div>
+
+          <section className="marksheet__details" aria-label="Student and examination details">
+            {details.map(([label, value]) => (
+              <div key={label}>
+                <span>{label}</span>
+                <strong>{value || '—'}</strong>
+              </div>
+            ))}
+          </section>
+
+          <div className="marksheet__table-wrap">
+            <table className="marksheet__table">
+              <thead>
+                <tr>
+                  <th rowSpan="2">No.</th>
+                  <th rowSpan="2" className="marksheet__subject">Subject</th>
+                  <th colSpan="2">Sectional</th>
+                  <th colSpan="2">Practical</th>
+                  <th colSpan="2">Theory</th>
+                  <th colSpan="2">Total</th>
+                  <th rowSpan="2">%</th>
+                  <th rowSpan="2">Grade</th>
+                  <th rowSpan="2">Result</th>
+                </tr>
+                <tr>
+                  <th>Obt.</th><th>Max.</th>
+                  <th>Obt.</th><th>Max.</th>
+                  <th>Obt.</th><th>Max.</th>
+                  <th>Obt.</th><th>Max.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((row, index) => {
+                  const subjectFailed = String(row.grade).toUpperCase() === 'F'
+                  return (
+                    <tr key={row.id}>
+                      <td>{index + 1}</td>
+                      <td className="marksheet__subject"><strong>{row.subject}</strong></td>
+                      <td>{formatMark(row.sectional_obtained)}</td>
+                      <td>{formatMark(row.sectional_total)}</td>
+                      <td>{formatMark(row.practical_obtained)}</td>
+                      <td>{formatMark(row.practical_total)}</td>
+                      <td>{formatMark(row.theory_obtained)}</td>
+                      <td>{formatMark(row.theory_total)}</td>
+                      <td><strong>{formatMark(row.total_obtained)}</strong></td>
+                      <td>{formatMark(row.total_marks)}</td>
+                      <td>{Number(row.percentage || 0).toFixed(2)}</td>
+                      <td><strong>{row.grade}</strong></td>
+                      <td><span className={`marksheet__row-result ${subjectFailed ? 'is-fail' : 'is-pass'}`}>{subjectFailed ? 'Fail' : 'Pass'}</span></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <section className="marksheet__summary" aria-label="Overall result">
+            <div><span>Grand Total</span><strong>{formatMark(grandObtained)} / {formatMark(grandTotal)}</strong></div>
+            <div><span>Overall Percentage</span><strong>{overallPercentage.toFixed(2)}%</strong></div>
+            <div className={`marksheet__final-result ${failed ? 'is-fail' : 'is-pass'}`}>
+              <span>Final Result</span><strong>{overallResult}</strong>
+            </div>
+          </section>
+
+          <footer className="marksheet__footer">
+            <div className="marksheet__signature"><span>Prepared &amp; Checked By</span><strong>Examination Department</strong></div>
+            <div className="marksheet__seal"><Logo size={62} /><span>Academy Seal</span></div>
+            <div className="marksheet__signature"><span>Controller of Examination</span><strong>Authorised Signatory</strong></div>
+          </footer>
+          <p className="marksheet__note">This is a digitally generated marksheet. Any alteration makes this document invalid.</p>
+        </div>
+      </article>
+
+      <div className="card-download-panel">
+        <div>
+          <strong>Save your official marksheet</strong>
+          <span>Choose “Save to PDF” in the print window to download a copy.</span>
+        </div>
+        <div className="card-download-panel__actions">
+          <button className="btn" onClick={() => printCard('marksheet-print', fileName)}>Download PDF</button>
+          <button className="btn btn--outline" onClick={() => printCard('marksheet-print', fileName)}>Print marksheet</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Pass Certificate (printable / downloadable) ──────────────────────── */
+function PassCertificate({ student, results }) {
+  if (!results?.length || results.some(row => String(row.grade).toUpperCase() === 'F')) return null
+
+  const first = results[0]
+  const generatedDate = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })
+  const subjects = results.map(row => row.subject).join(', ')
+  const grandObtained = results.reduce((sum, row) => sum + Number(row.total_obtained || 0), 0)
+  const grandTotal = results.reduce((sum, row) => sum + Number(row.total_marks || 0), 0)
+  const percentage = grandTotal > 0 ? ((grandObtained / grandTotal) * 100).toFixed(2) : '0.00'
+  const certificateNo = `CERT-${String(first.exam_year || '').replace(/[^0-9]/g, '').slice(0, 4)}-${first.roll_no || student.reg_no || 'STUDENT'}`
+  const fileName = `IMFAA-Pass-Certificate-${first.roll_no || student.reg_no || 'student'}-${first.exam_year || ''}`
+
+  return (
+    <div className="certificate-wrap">
+      <article className="pass-certificate" id="pass-certificate-print">
+        <div className="certificate__watermark" aria-hidden="true">
+          THE INDIAN MUSIC &amp; FINE ART ACADEMY
+        </div>
+        <div className="certificate__inner">
+          <header className="certificate__header">
+            <Logo size={88} />
+            <div className="certificate__academy">
+              <h2>THE INDIAN MUSIC &amp; FINE ART ACADEMY</h2>
+              <strong>WEST BENGAL · INDIA</strong>
+              <span>Indian Fine Arts Association (New Delhi) · Self Organised Board</span>
+              <small>Registered in the name of B.M.F.A.A. · Govt. of West Bengal Societies Registration Act XXVI of 1961</small>
+            </div>
+            <div className="certificate__seal-mini"><Logo size={68} /><span>Official<br />Record</span></div>
+          </header>
+
+          <div className="certificate__eyebrow">Certificate of Achievement</div>
+          <h1>PASS CERTIFICATE</h1>
+          <p className="certificate__lead">This is to certify that</p>
+          <div className="certificate__student-name">{student.full_name || 'Student Name'}</div>
+          <p className="certificate__body-copy">
+            C/O <strong>{student.co_name || '—'}</strong>, Roll No. <strong>{first.roll_no || '—'}</strong>, has successfully passed the
+            <strong> {first.exam_class || '—'} </strong> examination conducted by The Indian Music &amp; Fine Art Academy.
+          </p>
+
+          <div className="certificate__details">
+            <div><span>Examination Class</span><strong>{first.exam_class || '—'}</strong></div>
+            <div><span>Subject</span><strong>{subjects || '—'}</strong></div>
+            <div><span>Centre Code</span><strong>{first.center_code || '—'}</strong></div>
+            <div><span>Centre Name</span><strong>{first.center_name || '—'}</strong></div>
+            <div><span>Examination Session</span><strong>{first.exam_year || '—'}</strong></div>
+            <div><span>Percentage</span><strong>{percentage}% · PASS</strong></div>
+          </div>
+
+          <div className="certificate__result"><span>Successfully Passed</span><strong>PASS</strong></div>
+
+          <footer className="certificate__footer">
+            <div className="certificate__seal"><Logo size={112} /><span>Academy Seal</span></div>
+            <div className="certificate__certificate-meta"><span>Certificate No.</span><strong>{certificateNo}</strong><span>Generated Date</span><strong>{generatedDate}</strong></div>
+            <div className="certificate__digital-sign"><span className="certificate__signature-script">IMFAA Authority</span><strong>Digitally Signed</strong><small>Examination Department</small><em>No physical signature required</em></div>
+          </footer>
+          <p className="certificate__note">This digitally generated certificate is valid without a handwritten signature. Any alteration makes this certificate invalid.</p>
+        </div>
+      </article>
+
+      <div className="card-download-panel">
+        <div>
+          <strong>Download your pass certificate</strong>
+          <span>Choose “Save to PDF” in the print window to keep this certificate.</span>
+        </div>
+        <div className="card-download-panel__actions">
+          <button className="btn" onClick={() => printCard('pass-certificate-print', fileName)}>Download PDF</button>
+          <button className="btn btn--outline" onClick={() => printCard('pass-certificate-print', fileName)}>Print certificate</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1460,6 +1745,7 @@ function StudentDashboard({ session, onLogout }) {
   const [exams, setExams] = useState([])
   const [openYears, setOpenYears] = useState([])
   const [admitIdx, setAdmitIdx] = useState(0)
+  const [resultIdx, setResultIdx] = useState(0)
   const [results, setResults] = useState([])
 
   useEffect(() => {
@@ -1476,10 +1762,11 @@ function StudentDashboard({ session, onLogout }) {
 
   const loadResults = () => {
     api('/api/student/results', { token: session.token })
-      .then(d => setResults(d.results))
+      .then(d => { setResults(d.results); setResultIdx(0) })
       .catch(() => {})
   }
 
+  useEffect(() => { loadExams(); loadResults() }, [])
   useEffect(() => { if (page === 'exams' || page === 'exam' || page === 'admit') loadExams() }, [page])
   useEffect(() => { if (page === 'exam') api('/api/exam-sessions').then(d => setOpenYears(d.sessions)).catch(() => {}) }, [page])
   useEffect(() => { if (page === 'results') loadResults() }, [page])
@@ -1490,6 +1777,14 @@ function StudentDashboard({ session, onLogout }) {
   const nav = p => { setPage(p); setSideOpen(false) }
 
   const s = student
+  const registrationReady = Boolean(s.reg_no)
+  const releasedAdmitCount = exams.filter(e => e.admit_released).length
+  const resultGroups = Array.from(results.reduce((groups, row) => {
+    const key = row.exam_form_id || `${row.exam_year}-${row.roll_no}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(row)
+    return groups
+  }, new Map()).values())
 
   const MENU = [
     { id: 'profile', icon: '👤', label: 'My Profile' },
@@ -1497,10 +1792,10 @@ function StudentDashboard({ session, onLogout }) {
     { id: 'exam', icon: '📝', label: 'Exam Fillup' },
     { id: 'exams', icon: '📋', label: 'My Exam Forms' },
     { id: 'admit', icon: '🎟️', label: 'Admit Card' },
-    { id: 'results', icon: '🏆', label: 'My Results' },
+    { id: 'results', icon: '🏆', label: 'My Marksheet' },
   ]
 
-  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', admit: 'Admit Card', results: 'My Results' }
+  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', admit: 'Admit Card', results: 'My Marksheet' }
 
   return (
     <div className="ds-layout">
@@ -1547,11 +1842,75 @@ function StudentDashboard({ session, onLogout }) {
                 </div>
               )}
               <ProfileCard s={s} />
+              <section className="student-documents" aria-labelledby="student-documents-title">
+                <div className="student-documents__head">
+                  <div>
+                    <span className="eyebrow">My documents</span>
+                    <h2 id="student-documents-title">Download your official cards</h2>
+                  </div>
+                  <p>Open a card, then save it as a PDF or print a copy.</p>
+                </div>
+                <div className="student-documents__grid">
+                  <article className="student-document">
+                    <span className="student-document__icon">ID</span>
+                    <div className="student-document__copy">
+                      <span className={`card-status ${registrationReady ? 'card-status--active' : 'card-status--waiting'}`}>
+                        {registrationReady ? 'Ready' : s.status === 'rejected' ? 'Needs attention' : 'Approval pending'}
+                      </span>
+                      <h3>Registration Card</h3>
+                      <p>{registrationReady ? 'Your permanent academy registration and student details.' : 'The card becomes downloadable after the academy approves your registration.'}</p>
+                    </div>
+                    <button className="btn btn--sm" onClick={() => nav('card')}>{registrationReady ? 'View & download' : 'View status'}</button>
+                  </article>
+                  <article className={`student-document ${releasedAdmitCount ? '' : 'student-document--waiting'}`}>
+                    <span className="student-document__icon">EX</span>
+                    <div className="student-document__copy">
+                      <span className={`card-status ${releasedAdmitCount ? 'card-status--active' : 'card-status--waiting'}`}>
+                        {releasedAdmitCount ? `${releasedAdmitCount} ready` : 'Not released'}
+                      </span>
+                      <h3>Admit Card</h3>
+                      <p>{releasedAdmitCount ? 'Your examination admit card is ready to download.' : 'It will appear after approval, payment and academy release.'}</p>
+                    </div>
+                    <button className="btn btn--sm btn--outline" onClick={() => nav('admit')}>View status</button>
+                  </article>
+                  <article className={`student-document ${resultGroups.length ? '' : 'student-document--waiting'}`}>
+                    <span className="student-document__icon">MS</span>
+                    <div className="student-document__copy">
+                      <span className={`card-status ${resultGroups.length ? 'card-status--active' : 'card-status--waiting'}`}>
+                        {resultGroups.length ? `${resultGroups.length} published` : 'Not published'}
+                      </span>
+                      <h3>Academic Marksheet</h3>
+                      <p>{resultGroups.length ? 'Your subject marks, percentage and final result are ready.' : 'It will appear after the academy publishes your examination result.'}</p>
+                    </div>
+                    <button className="btn btn--sm btn--outline" onClick={() => nav('results')}>{resultGroups.length ? 'View & download' : 'View status'}</button>
+                  </article>
+                  <article className={`student-document ${resultGroups.length && !resultGroups[0].some(row => String(row.grade).toUpperCase() === 'F') ? '' : 'student-document--waiting'}`}>
+                    <span className="student-document__icon">PC</span>
+                    <div className="student-document__copy">
+                      <span className={`card-status ${resultGroups.length && !resultGroups[0].some(row => String(row.grade).toUpperCase() === 'F') ? 'card-status--active' : 'card-status--waiting'}`}>
+                        {resultGroups.length && !resultGroups[0].some(row => String(row.grade).toUpperCase() === 'F') ? 'Pass certificate' : 'Available after pass'}
+                      </span>
+                      <h3>Pass Certificate</h3>
+                      <p>A formal digital certificate with your roll, centre, class and examination details.</p>
+                    </div>
+                    <button className="btn btn--sm btn--outline" onClick={() => nav('results')}>View certificate</button>
+                  </article>
+                </div>
+              </section>
               <p className="ds-note">Your login credentials are your Aadhaar number and date of birth. Contact the admin to update any details.</p>
             </>
           )}
 
-          {page === 'card' && <RegistrationCard s={s} />}
+          {page === 'card' && (registrationReady ? (
+            <RegistrationCard s={s} />
+          ) : (
+            <div className="document-waiting">
+              <span className="document-waiting__icon">ID</span>
+              <span className="card-status card-status--waiting">{s.status === 'rejected' ? 'Needs attention' : 'Approval pending'}</span>
+              <h2>{s.status === 'rejected' ? 'Registration needs review' : 'Registration card is being prepared'}</h2>
+              <p>{s.status === 'rejected' ? 'Please contact the academy to correct your registration details.' : 'Your registration card will be ready to download as soon as the academy approves your application.'}</p>
+            </div>
+          ))}
 
           {page === 'exam' && (
             availableYears.length ? (
@@ -1609,9 +1968,11 @@ function StudentDashboard({ session, onLogout }) {
             const released = exams.filter(e => e.admit_released)
             if (released.length === 0)
               return (
-                <div className="ds-empty">
-                  No admit card is available yet. Your admit card appears here once the academy
-                  approves your form, confirms payment, and releases it.
+                <div className="document-waiting">
+                  <span className="document-waiting__icon">EX</span>
+                  <span className="card-status card-status--waiting">Not released</span>
+                  <h2>Admit card is not available yet</h2>
+                  <p>Your admit card will appear here after the academy approves your exam form, confirms payment and releases the card.</p>
                 </div>
               )
             const idx = Math.min(admitIdx, released.length - 1)
@@ -1635,33 +1996,32 @@ function StudentDashboard({ session, onLogout }) {
           })()}
 
           {page === 'results' && (
-            <div className="student-results">
-              {results.length === 0 ? (
-                <div className="ds-empty">No result has been published for you yet.</div>
-              ) : (
-                <div className="ds-table-wrap">
-                  <table className="ds-table">
-                    <thead><tr><th>Session</th><th>Roll No</th><th>Subject</th><th>Class</th><th>Sectional</th><th>Practical</th><th>Theory</th><th>Total</th><th>Percentage</th><th>Grade</th></tr></thead>
-                    <tbody>
-                      {results.map(r => (
-                        <tr key={r.id}>
-                          <td>{r.exam_year}</td>
-                          <td><strong>{r.roll_no}</strong></td>
-                          <td>{r.subject}</td>
-                          <td>{r.exam_class}</td>
-                          <td>{Number(r.sectional_obtained).toFixed(2)} / {Number(r.sectional_total).toFixed(2)}</td>
-                          <td>{Number(r.practical_obtained).toFixed(2)} / {Number(r.practical_total).toFixed(2)}</td>
-                          <td>{Number(r.theory_obtained).toFixed(2)} / {Number(r.theory_total).toFixed(2)}</td>
-                          <td>{Number(r.total_obtained).toFixed(2)} / {Number(r.total_marks).toFixed(2)}</td>
-                          <td>{Number(r.percentage).toFixed(2)}%</td>
-                          <td><ResultGrade grade={r.grade} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+            results.length === 0 ? (
+              <div className="document-waiting">
+                <span className="document-waiting__icon">MS</span>
+                <span className="card-status card-status--waiting">Not published</span>
+                <h2>Your marksheet is not available yet</h2>
+                <p>The academy will publish your marksheet after your examination results have been entered.</p>
+              </div>
+            ) : (
+              <div className="student-results">
+                {resultGroups.length > 1 && (
+                  <div className="ds-toolbar marksheet-picker">
+                    <label>Select marksheet:&nbsp;
+                      <select value={Math.min(resultIdx, resultGroups.length - 1)} onChange={event => setResultIdx(Number(event.target.value))}>
+                        {resultGroups.map((group, index) => (
+                          <option key={`${group[0].exam_form_id || index}`} value={index}>
+                            {group[0].exam_year} — {group[0].exam_class} (Roll {group[0].roll_no})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+                <Marksheet student={s} results={resultGroups[Math.min(resultIdx, resultGroups.length - 1)]} />
+                <PassCertificate student={s} results={resultGroups[Math.min(resultIdx, resultGroups.length - 1)]} />
+              </div>
+            )
           )}
         </div>
       </div>
