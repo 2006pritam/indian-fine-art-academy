@@ -106,6 +106,10 @@ const formatCardDate = value => {
   const date = new Date(`${String(value).slice(0, 10)}T00:00:00`)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
+const formatExamDate = value => {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/)
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : (value || '—')
+}
 
 // Opens the browser's reliable Save as PDF dialog with a useful filename.
 function printCard(id, filename) {
@@ -1081,6 +1085,23 @@ function AdminDashboard({ session, onLogout }) {
   const [resultExamId, setResultExamId] = useState('')
   const [resultSubject, setResultSubject] = useState('')
   const [resultModal, setResultModal] = useState(null)
+  const [reportYear, setReportYear] = useState('')
+  const [onlineExams, setOnlineExams] = useState([])
+  const [onlinePreview, setOnlinePreview] = useState(null)
+  const [onlinePreviewLoadingId, setOnlinePreviewLoadingId] = useState(null)
+  const [onlinePreviewImage, setOnlinePreviewImage] = useState(null)
+  const [rescheduleExam, setRescheduleExam] = useState(null)
+  const [rescheduleDate, setRescheduleDate] = useState('')
+  const [rescheduleStart, setRescheduleStart] = useState('')
+  const [rescheduleEnd, setRescheduleEnd] = useState('')
+  const [rescheduleBusy, setRescheduleBusy] = useState(false)
+  const [onlineExamYear, setOnlineExamYear] = useState('')
+  const [onlineExamDate, setOnlineExamDate] = useState('')
+  const [onlineExamStart, setOnlineExamStart] = useState('09:00')
+  const [onlineExamEnd, setOnlineExamEnd] = useState('10:00')
+  const [onlineTopic, setOnlineTopic] = useState('')
+  const [onlineScope, setOnlineScope] = useState('all')
+  const [onlineSelectedStudents, setOnlineSelectedStudents] = useState([])
 
   useEffect(() => {
     if (err) notify({ type: 'error', title: 'Action failed', message: err })
@@ -1134,11 +1155,18 @@ function AdminDashboard({ session, onLogout }) {
       .catch(e => setErr(e.message))
   }
 
+  const loadOnlineExams = () => {
+    api('/api/admin/online-exams', { token: session.token })
+      .then(d => setOnlineExams(d.exams || []))
+      .catch(e => setErr(e.message))
+  }
+
   useEffect(() => { if (page === 'students' || page === 'home') load() }, [page])
-  useEffect(() => { if (page === 'exams' || page === 'attendance' || page === 'results') loadExams() }, [page])
-  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit' || page === 'attendance' || page === 'results') loadSessions() }, [page])
+  useEffect(() => { if (page === 'exams' || page === 'attendance' || page === 'results' || page === 'online') loadExams() }, [page])
+  useEffect(() => { if (page === 'years' || page === 'exam-new' || page === 'admit' || page === 'attendance' || page === 'results' || page === 'online') loadSessions() }, [page])
   useEffect(() => { if (page === 'fees') loadFees() }, [page])
   useEffect(() => { if (page === 'results') loadResults() }, [page])
+  useEffect(() => { if (page === 'online') loadOnlineExams() }, [page])
 
   const openSession = async () => {
     if (!newYear) return
@@ -1312,6 +1340,139 @@ function AdminDashboard({ session, onLogout }) {
     s.aadhaar?.includes(search) || s.phone?.includes(search) || s.reg_no?.includes(search)
   )
 
+  const eligibleOnlineStudents = Array.from(new Map(
+    exams
+      .filter(e => e.status === 'approved' && e.payment_status === 'paid' && e.student_id)
+      .map(e => [e.student_id, { id: e.student_id, full_name: e.full_name, reg_no: e.reg_no, roll_no: e.roll_no, exam_class: e.exam_class, exam_year: e.exam_year }])
+  ).values())
+
+  const submitOnlineExam = async () => {
+    setErr('')
+    if (!onlineExamYear || !onlineExamDate || !onlineExamStart || !onlineExamEnd || !onlineTopic.trim()) {
+      setErr('Exam year, date, start/end time and topic are required.')
+      return
+    }
+    if (onlineExamStart >= onlineExamEnd) {
+      setErr('End time must be later than start time.')
+      return
+    }
+
+    try {
+      const payload = {
+        examYear: onlineExamYear,
+        examDate: onlineExamDate,
+        startTime: onlineExamStart,
+        endTime: onlineExamEnd,
+        topic: onlineTopic.trim(),
+        targetScope: onlineScope,
+        studentIds: onlineScope === 'specific' ? onlineSelectedStudents : [],
+      }
+      const d = await api('/api/admin/online-exams', { method: 'POST', body: payload, token: session.token })
+      setOnlineExams(prev => [d.exam, ...prev])
+      setOnlineExamYear(''); setOnlineExamDate(''); setOnlineExamStart('09:00'); setOnlineExamEnd('10:00'); setOnlineTopic(''); setOnlineScope('all'); setOnlineSelectedStudents([])
+      notify({ type: 'success', title: 'Online exam scheduled', message: `Created exam for ${d.exam.exam_year}.` })
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
+
+  const previewOnlineExam = async examId => {
+    setOnlinePreviewLoadingId(examId)
+    setOnlinePreview({ examId, submissions: [] })
+    try {
+      const d = await api(`/api/admin/online-exams/${examId}/submissions`, { token: session.token })
+      setOnlinePreview({ examId, submissions: d.submissions || [] })
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setOnlinePreviewLoadingId(null)
+    }
+  }
+
+  const openOnlineReschedule = exam => {
+    setRescheduleExam(exam)
+    setRescheduleDate(String(exam.exam_date || '').slice(0, 10))
+    setRescheduleStart(String(exam.start_time || '').slice(0, 5))
+    setRescheduleEnd(String(exam.end_time || '').slice(0, 5))
+  }
+
+  const saveOnlineReschedule = async event => {
+    event.preventDefault()
+    if (!rescheduleExam || !rescheduleDate || !rescheduleStart || !rescheduleEnd) return
+    if (rescheduleStart >= rescheduleEnd) {
+      setErr('End time must be later than the start time.')
+      return
+    }
+    setErr('')
+    setRescheduleBusy(true)
+    try {
+      await api(`/api/admin/online-exams/${rescheduleExam.id}/reschedule`, {
+        method: 'PATCH',
+        token: session.token,
+        body: { examDate: rescheduleDate, startTime: rescheduleStart, endTime: rescheduleEnd },
+      })
+      setRescheduleExam(null)
+      loadOnlineExams()
+      notify({ type: 'success', title: 'Online exam rescheduled', message: 'The new date and time are available to students who have not submitted.' })
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setRescheduleBusy(false)
+    }
+  }
+
+  const reportRows = exams
+    .filter(e => e.status === 'approved' && e.payment_status === 'paid')
+    .filter(e => !reportYear || e.exam_year === reportYear)
+    .sort((a, b) => {
+      const year = (a.exam_year || '').localeCompare(b.exam_year || '')
+      if (year) return year
+      const cls = (a.exam_class || '').localeCompare(b.exam_class || '')
+      if (cls) return cls
+      return (a.roll_no || '').localeCompare(b.roll_no || '')
+    })
+
+  const exportExamReport = () => {
+    if (!reportRows.length) {
+      setErr('No approved and paid exam forms are available for the selected report.')
+      return
+    }
+
+    const headers = ['Exam Year', 'Exam Class', 'Roll No', 'Reg No', 'Student Name', 'Co/Guardian', 'Phone', 'Aadhaar', 'Center Code', 'Center Name', 'Payment Status', 'Status', 'Filled By']
+    const csv = [
+      headers.join(','),
+      ...reportRows.map(row => headers.map(header => {
+        const value = {
+          'Exam Year': row.exam_year || '',
+          'Exam Class': row.exam_class || '',
+          'Roll No': row.roll_no || '',
+          'Reg No': row.reg_no || '',
+          'Student Name': row.full_name || '',
+          'Co/Guardian': row.co_name || '',
+          'Phone': row.phone || '',
+          'Aadhaar': row.aadhaar || '',
+          'Center Code': row.center_code || '',
+          'Center Name': row.center_name || '',
+          'Payment Status': row.payment_status || '',
+          'Status': row.status || '',
+          'Filled By': row.filled_by || '',
+        }[header] ?? ''
+        return `"${String(value).replace(/"/g, '""')}"`
+      }).join(','))
+    ].join('\n')
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'application/vnd.ms-excel;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `IMFAA-Exam-Report-${reportYear || 'All'}-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    notify({ type: 'success', title: 'Report exported', message: `Downloaded ${reportRows.length} approved and paid records for sign-off.` })
+  }
+
   const MENU = [
     { id: 'home', icon: '🏠', label: 'Dashboard' },
     { id: 'notices', icon: '📢', label: 'Notices' },
@@ -1320,6 +1481,8 @@ function AdminDashboard({ session, onLogout }) {
     { id: 'share', icon: '🔗', label: 'Share Link' },
     { id: 'years', icon: '📅', label: 'Exam Years' },
     { id: 'exams', icon: '📋', label: 'Exam Forms' },
+    { id: 'online', icon: '🧠', label: 'Online Exam' },
+    { id: 'reports', icon: '📊', label: 'Reports' },
     { id: 'fees', icon: '💰', label: 'Exam Fees' },
     { id: 'admit', icon: '🎟️', label: 'Admit Release' },
     { id: 'attendance', icon: '✅', label: 'Attendance' },
@@ -1366,6 +1529,8 @@ function AdminDashboard({ session, onLogout }) {
             {page === 'edit' && 'Edit Student'}
             {page === 'years' && 'Exam Years'}
             {page === 'exams' && 'Exam Forms'}
+            {page === 'online' && 'Online Exam'}
+            {page === 'reports' && 'Exam Report'}
             {page === 'fees' && 'Exam Fees'}
             {page === 'exam-new' && 'New Exam Form'}
             {page === 'admit' && 'Admit Release'}
@@ -1582,6 +1747,213 @@ function AdminDashboard({ session, onLogout }) {
             <div>
               <button className="dash__back" onClick={() => nav('exams')}>← Exam Forms</button>
               <ExamForm session={session} mode="admin" />
+            </div>
+          )}
+
+          {/* Online Exam */}
+          {page === 'online' && (
+            <div>
+              <div className="reg-form__section">
+                <h4>Schedule Online Exam</h4>
+                <p className="exam-hint">Create a live timed question round for approved and paid students. You can schedule the same or different times for individual students or the whole class.</p>
+                {err && <p className="auth__err">{err}</p>}
+                <div className="reg-form__grid">
+                  <label>Exam Year
+                    <select value={onlineExamYear} onChange={e => setOnlineExamYear(e.target.value)}>
+                      <option value="">Select year</option>
+                      {sessions.map(y => <option key={y}>{y}</option>)}
+                    </select>
+                  </label>
+                  <label>Exam Date
+                    <input type="date" value={onlineExamDate} onChange={e => setOnlineExamDate(e.target.value)} />
+                  </label>
+                  <label>Start Time
+                    <input type="time" value={onlineExamStart} onChange={e => setOnlineExamStart(e.target.value)} />
+                  </label>
+                  <label>End Time
+                    <input type="time" value={onlineExamEnd} onChange={e => setOnlineExamEnd(e.target.value)} />
+                  </label>
+                  <label className="reg-form__full">Topic / Question
+                    <input value={onlineTopic} onChange={e => setOnlineTopic(e.target.value)} placeholder="Write the exam topic/question here" />
+                  </label>
+                </div>
+
+                <div className="reg-form__grid">
+                  <label>Student Scope
+                    <select value={onlineScope} onChange={e => setOnlineScope(e.target.value)}>
+                      <option value="all">All approved &amp; paid students</option>
+                      <option value="specific">Selected students only</option>
+                    </select>
+                  </label>
+                </div>
+
+                {onlineScope === 'specific' && (
+                  <div className="ds-table-wrap">
+                    <table className="ds-table">
+                      <thead><tr><th>Select</th><th>Roll No</th><th>Name</th><th>Class</th></tr></thead>
+                      <tbody>
+                        {eligibleOnlineStudents.length === 0 && <tr><td colSpan="4" className="ds-empty-cell">No approved and paid students available.</td></tr>}
+                        {eligibleOnlineStudents.map(student => (
+                          <tr key={student.id}>
+                            <td><input type="checkbox" checked={onlineSelectedStudents.includes(student.id)} onChange={e => {
+                              setOnlineSelectedStudents(prev => e.target.checked ? [...prev, student.id] : prev.filter(id => id !== student.id))
+                            }} /></td>
+                            <td>{student.roll_no}</td>
+                            <td>{student.full_name}</td>
+                            <td>{student.exam_class}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div className="reg-form__actions">
+                  <button className="btn" onClick={submitOnlineExam}>Create Online Exam</button>
+                </div>
+              </div>
+
+              <div className="reg-form__section">
+                <h4>Scheduled Exams</h4>
+                <div className="ds-table-wrap">
+                  <table className="ds-table">
+                    <thead><tr><th>Topic</th><th>Year</th><th>Date</th><th>Time</th><th>Students</th><th>Submissions</th><th>Actions</th></tr></thead>
+                    <tbody>
+                      {onlineExams.length === 0 && <tr><td colSpan="7" className="ds-empty-cell">No online exams scheduled yet.</td></tr>}
+                      {onlineExams.map(oe => (
+                        <tr key={oe.id}>
+                          <td><strong>{oe.topic}</strong></td>
+                          <td>{oe.exam_year}</td>
+                          <td>{formatExamDate(oe.exam_date)}</td>
+                          <td>{oe.start_time} - {oe.end_time}</td>
+                          <td>{oe.target_scope === 'specific' ? 'Selected students' : 'All'} ({oe.student_ids?.length || 0})</td>
+                          <td>{Number(oe.submission_count || 0)} / {Number(oe.assigned_count ?? oe.student_ids?.length ?? 0)}</td>
+                          <td>
+                            <button className="btn btn--sm" onClick={() => previewOnlineExam(oe.id)} disabled={onlinePreviewLoadingId === oe.id}>{onlinePreviewLoadingId === oe.id ? 'Loading…' : 'Preview'}</button>
+                            {Number(oe.pending_count ?? Math.max((oe.student_ids?.length || 0) - Number(oe.submission_count || 0), 0)) > 0 && (
+                              <button className="btn btn--sm btn--outline" onClick={() => openOnlineReschedule(oe)}>Reschedule</button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {onlinePreview && (
+                <div className="reg-form__section">
+                  <h4>Submitted Answers</h4>
+                  <div className="ds-table-wrap">
+                    <table className="ds-table">
+                      <thead><tr><th>Roll No</th><th>Name</th><th>Class</th><th>Submitted</th><th>View</th></tr></thead>
+                      <tbody>
+                        {onlinePreviewLoadingId === onlinePreview.examId && <tr><td colSpan="5" className="ds-empty-cell">Loading submissions…</td></tr>}
+                        {onlinePreviewLoadingId !== onlinePreview.examId && (!onlinePreview.submissions || onlinePreview.submissions.length === 0) && <tr><td colSpan="5" className="ds-empty-cell">No submissions yet.</td></tr>}
+                        {(onlinePreview.submissions || []).map(sub => (
+                          <tr key={sub.id}>
+                            <td>{sub.roll_no}</td>
+                            <td>{sub.full_name}</td>
+                            <td>{sub.exam_class}</td>
+                            <td>{new Date(sub.submitted_at).toLocaleString('en-IN')}</td>
+                            <td>
+                              <button className="btn btn--sm" type="button" aria-label={`View answer from ${sub.full_name}`} title="View submitted answer" onClick={() => setOnlinePreviewImage(sub)}>👁</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {onlinePreviewImage && (
+                <div className="result-modal" role="presentation" onClick={() => setOnlinePreviewImage(null)}>
+                  <div className="result-modal__card online-answer-modal" role="dialog" aria-modal="true" aria-label={`Submitted answer from ${onlinePreviewImage.full_name}`} onClick={e => e.stopPropagation()}>
+                    <button type="button" className="result-modal__close" aria-label="Close image preview" onClick={() => setOnlinePreviewImage(null)}>×</button>
+                    <div className="result-modal__head">
+                      <span className="eyebrow">Submitted Answer</span>
+                      <h2>{onlinePreviewImage.full_name}</h2>
+                      <p>Roll {onlinePreviewImage.roll_no} · {onlinePreviewImage.exam_class} · {onlinePreviewImage.topic}</p>
+                    </div>
+                    <img className="online-answer-modal__image" src={onlinePreviewImage.file_data} alt={`Submitted answer from ${onlinePreviewImage.full_name}`} />
+                  </div>
+                </div>
+              )}
+              {rescheduleExam && (
+                <div className="result-modal" role="presentation" onClick={() => !rescheduleBusy && setRescheduleExam(null)}>
+                  <form className="result-modal__card" role="dialog" aria-modal="true" aria-label="Reschedule online exam" onSubmit={saveOnlineReschedule} onClick={e => e.stopPropagation()}>
+                    <button type="button" className="result-modal__close" aria-label="Close reschedule dialog" onClick={() => setRescheduleExam(null)}>×</button>
+                    <div className="result-modal__head">
+                      <span className="eyebrow">Pending students: {Number(rescheduleExam.pending_count ?? Math.max((rescheduleExam.student_ids?.length || 0) - Number(rescheduleExam.submission_count || 0), 0))}</span>
+                      <h2>Reschedule Online Exam</h2>
+                      <p>{rescheduleExam.topic}</p>
+                    </div>
+                    <div className="reg-form__grid">
+                      <label>New Exam Date
+                        <input type="date" value={rescheduleDate} onChange={e => setRescheduleDate(e.target.value)} required />
+                      </label>
+                      <label>New Start Time
+                        <input type="time" value={rescheduleStart} onChange={e => setRescheduleStart(e.target.value)} required />
+                      </label>
+                      <label>New End Time
+                        <input type="time" value={rescheduleEnd} onChange={e => setRescheduleEnd(e.target.value)} required />
+                      </label>
+                    </div>
+                    <div className="result-modal__actions">
+                      <button type="button" className="btn btn--ghost-dark" onClick={() => setRescheduleExam(null)} disabled={rescheduleBusy}>Cancel</button>
+                      <button type="submit" className="btn" disabled={rescheduleBusy}>{rescheduleBusy ? 'Saving…' : 'Save New Schedule'}</button>
+                    </div>
+                  </form>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Exam Report */}
+          {page === 'reports' && (
+            <div>
+              <div className="reg-form__section">
+                <h4>Approved &amp; Paid Exam Report</h4>
+                <p className="exam-hint">This report includes all exam forms that were approved and marked paid. Download the sheet for signatures and record keeping.</p>
+                {err && <p className="auth__err">{err}</p>}
+                <div className="ds-toolbar" style={{ gap: 12, justifyContent: 'flex-start', alignItems: 'center', padding: 0 }}>
+                  <select value={reportYear} onChange={e => setReportYear(e.target.value)}>
+                    <option value="">All exam years</option>
+                    {sessions.map(y => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                  <button className="btn btn--sm" onClick={exportExamReport} disabled={!reportRows.length}>Generate Excel Sheet</button>
+                </div>
+              </div>
+
+              <div className="ds-table-wrap">
+                <table className="ds-table">
+                  <thead>
+                    <tr>
+                      <th>Year</th>
+                      <th>Class</th>
+                      <th>Roll</th>
+                      <th>Reg No</th>
+                      <th>Student Name</th>
+                      <th>Center</th>
+                      <th>Payment</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reportRows.length === 0 && <tr><td colSpan="7" className="ds-empty-cell">No approved and paid exam forms found.</td></tr>}
+                    {reportRows.map(row => (
+                      <tr key={row.id}>
+                        <td>{row.exam_year}</td>
+                        <td>{row.exam_class}</td>
+                        <td><strong>{row.roll_no}</strong></td>
+                        <td>{row.reg_no}</td>
+                        <td>{row.full_name}</td>
+                        <td>{row.center_name} ({row.center_code})</td>
+                        <td><PayBadge status={row.payment_status} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -1877,8 +2249,87 @@ function StudentDashboard({ session, onLogout }) {
   const [results, setResults] = useState([])
   const [paymentRetryId, setPaymentRetryId] = useState(null)
   const [paymentCheckId, setPaymentCheckId] = useState(null)
+  const [onlineExams, setOnlineExams] = useState([])
+  const [onlineUpload, setOnlineUpload] = useState({})
+  const [onlineSubmitting, setOnlineSubmitting] = useState({})
+  const [onlineClock, setOnlineClock] = useState({})
   const updatePayment = exam => setExams(previous => previous.map(item => item.id === exam.id ? { ...item, ...exam } : item))
   usePaymentRefresh(exams, session.token, updatePayment)
+
+  const readImageFile = file => new Promise((resolve, reject) => {
+    if (!file || !file.type || !/^image\/(png|jpeg|jpg)$/i.test(file.type)) {
+      reject(new Error('Only PNG, JPG and JPEG images are allowed.'))
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error('Image could not be read.'))
+    reader.readAsDataURL(file)
+  })
+
+  const handleOnlineFile = async (examId, file) => {
+    if (!file) return
+    try {
+      const imageData = await readImageFile(file)
+      setOnlineUpload(prev => ({ ...prev, [examId]: imageData }))
+    } catch (error) {
+      notify({ type: 'error', title: 'Invalid file', message: error.message })
+    }
+  }
+
+  const submitOnlineAnswer = async exam => {
+    const imageData = onlineUpload[exam.id]
+    if (!imageData) {
+      notify({ type: 'warning', title: 'No answer image', message: 'Choose a PNG, JPG or JPEG image before submitting.' })
+      return
+    }
+    setOnlineSubmitting(prev => ({ ...prev, [exam.id]: true }))
+    try {
+      const d = await api(`/api/student/online-exams/${exam.id}/submit`, {
+        method: 'POST',
+        token: session.token,
+        body: { imageData, topic: exam.topic || '' },
+      })
+      setOnlineExams(prev => prev.map(item => item.id === exam.id ? { ...item, submitted: true, file_data: d.submission?.file_data || item.file_data } : item))
+      setOnlineUpload(prev => ({ ...prev, [exam.id]: '' }))
+      notify({ type: 'success', title: 'Answer submitted', message: `Your answer for “${exam.topic}” was uploaded successfully.` })
+    } catch (error) {
+      notify({ type: 'error', title: 'Submission failed', message: error.message })
+    } finally {
+      setOnlineSubmitting(prev => ({ ...prev, [exam.id]: false }))
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const next = {}
+      for (const exam of onlineExams) {
+        const start = new Date(`${exam.exam_date}T${exam.start_time}`).getTime()
+        const end = new Date(`${exam.exam_date}T${exam.end_time}`).getTime()
+        const now = Date.now()
+        next[exam.id] = {
+          active: now >= start && now <= end,
+          remainingMs: now < start ? Math.max(0, start - now) : now <= end ? Math.max(0, end - now) : 0,
+        }
+      }
+      setOnlineClock(next)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [onlineExams])
+
+  useEffect(() => {
+    const next = {}
+    for (const exam of onlineExams) {
+      const start = new Date(`${exam.exam_date}T${exam.start_time}`).getTime()
+      const end = new Date(`${exam.exam_date}T${exam.end_time}`).getTime()
+      const now = Date.now()
+      next[exam.id] = {
+        active: now >= start && now <= end,
+        remainingMs: now < start ? Math.max(0, start - now) : now <= end ? Math.max(0, end - now) : 0,
+      }
+    }
+    setOnlineClock(next)
+  }, [onlineExams])
 
   useEffect(() => {
     api('/api/student/me', { token: session.token })
@@ -1895,6 +2346,12 @@ function StudentDashboard({ session, onLogout }) {
   const loadResults = () => {
     api('/api/student/results', { token: session.token })
       .then(d => { setResults(d.results); setResultIdx(0) })
+      .catch(() => {})
+  }
+
+  const loadOnlineExams = () => {
+    api('/api/student/online-exams', { token: session.token })
+      .then(d => setOnlineExams(d.exams || []))
       .catch(() => {})
   }
 
@@ -1926,7 +2383,7 @@ function StudentDashboard({ session, onLogout }) {
     } finally { setPaymentCheckId(null) }
   }
 
-  useEffect(() => { loadExams(); loadResults() }, [])
+  useEffect(() => { loadExams(); loadResults(); loadOnlineExams() }, [])
   useEffect(() => {
     const examId = new URLSearchParams(window.location.search).get('payment_exam')
     if (!examId) return
@@ -1944,9 +2401,9 @@ function StudentDashboard({ session, onLogout }) {
       })
     return () => controller.abort()
   }, [session.token])
-  useEffect(() => { if (page === 'exams' || page === 'exam' || page === 'admit') loadExams() }, [page])
+  useEffect(() => { if (page === 'exams' || page === 'exam' || page === 'admit' || page === 'online') loadExams() }, [page])
   useEffect(() => { if (page === 'exam') api('/api/exam-sessions').then(d => setOpenYears(d.sessions)).catch(() => {}) }, [page])
-  useEffect(() => { if (page === 'results') loadResults() }, [page])
+  useEffect(() => { if (page === 'results' || page === 'online') loadResults(); if (page === 'online') loadOnlineExams() }, [page])
 
   // Open years the student has not yet filled
   const availableYears = openYears.filter(y => !exams.some(e => e.exam_year === y))
@@ -1968,11 +2425,12 @@ function StudentDashboard({ session, onLogout }) {
     { id: 'card', icon: '🎫', label: 'Registration Card' },
     { id: 'exam', icon: '📝', label: 'Exam Fillup' },
     { id: 'exams', icon: '📋', label: 'My Exam Forms' },
+    { id: 'online', icon: '🧠', label: 'Online Exam' },
     { id: 'admit', icon: '🎟️', label: 'Admit Card' },
     { id: 'results', icon: '🏆', label: 'My Marksheet' },
   ]
 
-  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', admit: 'Admit Card', results: 'My Marksheet' }
+  const TITLES = { profile: 'My Profile', card: 'Registration Card', exam: 'Examination Form Fill-up', exams: 'My Exam Forms', online: 'Online Exam', admit: 'Admit Card', results: 'My Marksheet' }
 
   return (
     <div className="ds-layout">
@@ -2214,6 +2672,60 @@ function StudentDashboard({ session, onLogout }) {
                 <PassCertificate student={s} results={resultGroups[Math.min(resultIdx, resultGroups.length - 1)]} />
               </div>
             )
+          )}
+
+          {page === 'online' && (
+            <div className="reg-form__section">
+              <h4>Live Online Exams</h4>
+              <p className="exam-hint">Only approved and paid students assigned to this exam can upload a photo answer while the timer is live.</p>
+              <div className="ds-table-wrap">
+                <table className="ds-table">
+                  <thead><tr><th>Topic</th><th>Roll No</th><th>Class</th><th>Schedule</th><th>Status</th><th>Answer</th></tr></thead>
+                  <tbody>
+                    {onlineExams.length === 0 && <tr><td colSpan="6" className="ds-empty-cell">No online exam is assigned to you yet.</td></tr>}
+                    {onlineExams.map(exam => {
+                      const state = onlineClock[exam.id] || { active: false, remainingMs: 0 }
+                      const totalSeconds = Math.max(0, Math.floor((state.remainingMs || 0) / 1000))
+                      const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0')
+                      const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0')
+                      const seconds = String(totalSeconds % 60).padStart(2, '0')
+
+                      return (
+                        <tr key={exam.id}>
+                          <td><strong>{exam.topic}</strong></td>
+                          <td>{exam.roll_no}</td>
+                          <td>{exam.exam_class}</td>
+                          <td>{formatExamDate(exam.exam_date)} · {exam.start_time} to {exam.end_time}</td>
+                          <td>
+                            {exam.submitted ? <span className="status-badge status-badge--approved">Submitted</span> : state.active ? <span className="status-badge status-badge--live">Live</span> : <span className="status-badge status-badge--pending">Not live</span>}
+                            {!exam.submitted && state.active && <div className="exam-timer">{hours}:{minutes}:{seconds}</div>}
+                          </td>
+                          <td>
+                            {!exam.submitted && state.active ? (
+                              <div className="online-exam-upload">
+                                <input type="file" accept="image/png,image/jpeg,image/jpg" onChange={e => handleOnlineFile(exam.id, e.target.files?.[0])} />
+                                {onlineUpload[exam.id] && (
+                                  <>
+                                    <img src={onlineUpload[exam.id]} alt="Selected answer preview" className="online-exam-preview" />
+                                    <button className="btn btn--sm" onClick={() => submitOnlineAnswer(exam)} disabled={onlineSubmitting[exam.id]}>
+                                      {onlineSubmitting[exam.id] ? 'Submitting…' : 'Submit answer'}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            ) : exam.submitted ? (
+                              <button className="btn btn--sm btn--outline" onClick={() => window.open(exam.file_data, '_blank')}>View answer</button>
+                            ) : (
+                              <span className="ds-empty">Waiting for live time</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       </div>

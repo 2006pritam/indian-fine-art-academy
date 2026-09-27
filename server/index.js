@@ -27,6 +27,7 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
 const PORT = process.env.PORT || 4000
+const indiaDateTime = (date, time) => new Date(`${date}T${time}+05:30`)
 const PAYMENT_API_URL = process.env.PAYMENT_API_URL || 'https://famapi.mistahub.in/api'
 const PAYMENT_API_KEY = process.env.PAYMENT_API_KEY || ''
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || process.env.RENDER_EXTERNAL_URL || ''
@@ -176,6 +177,35 @@ async function init() {
       exam_class    TEXT UNIQUE NOT NULL,
       fee           INTEGER NOT NULL DEFAULT 0,
       updated_at    TIMESTAMPTZ DEFAULT now()
+    );
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS online_exams (
+      id            SERIAL PRIMARY KEY,
+      exam_year     TEXT NOT NULL,
+      exam_date     DATE NOT NULL,
+      start_time    TIME NOT NULL,
+      end_time      TIME NOT NULL,
+      topic         TEXT NOT NULL,
+      target_scope  TEXT NOT NULL DEFAULT 'all',
+      student_ids   INTEGER[] NOT NULL DEFAULT '{}',
+      created_by    TEXT NOT NULL,
+      created_at    TIMESTAMPTZ DEFAULT now()
+    );
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS online_exam_submissions (
+      id            SERIAL PRIMARY KEY,
+      exam_id       INTEGER NOT NULL REFERENCES online_exams(id) ON DELETE CASCADE,
+      student_id    INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      roll_no       TEXT,
+      exam_class    TEXT,
+      topic         TEXT,
+      file_data     TEXT NOT NULL,
+      submitted_at  TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (exam_id, student_id)
     );
   `)
 
@@ -729,6 +759,200 @@ app.get('/api/student/results', auth('student'), async (req, res) => {
     res.json({ results: rows })
   } catch (e) {
     console.error('GET /api/student/results:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Online exam scheduling / submission API
+app.get('/api/admin/online-exams', auth('admin'), async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+            SELECT oe.id, oe.exam_year, oe.exam_date::text AS exam_date, oe.start_time, oe.end_time,
+              oe.topic, oe.target_scope, oe.student_ids, oe.created_by, oe.created_at,
+                    COUNT(oes.id)::int AS submission_count,
+                    CARDINALITY(oe.student_ids)::int AS assigned_count,
+                    GREATEST(CARDINALITY(oe.student_ids) - COUNT(oes.id), 0)::int AS pending_count
+      FROM online_exams oe
+      LEFT JOIN online_exam_submissions oes ON oes.exam_id = oe.id
+      GROUP BY oe.id
+      ORDER BY oe.exam_date DESC, oe.start_time DESC
+    `)
+    res.json({ exams: rows })
+  } catch (e) {
+    console.error('GET /api/admin/online-exams:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/admin/online-exams', auth('admin'), async (req, res) => {
+  const b = req.body || {}
+  const { examYear, examDate, startTime, endTime, topic, targetScope, studentIds } = b
+  if (!examYear || !examDate || !startTime || !endTime || !topic || !String(topic).trim()) {
+    return res.status(400).json({ error: 'Exam year, date, start time, end time and topic are required' })
+  }
+  if (startTime >= endTime) {
+    return res.status(400).json({ error: 'End time must be later than the start time' })
+  }
+
+  try {
+    const week = await pool.query('SELECT id FROM exam_sessions WHERE exam_year=$1', [examYear])
+    if (!week.rows.length) return res.status(400).json({ error: `Exam session ${examYear} is not open` })
+
+    const eligible = await pool.query(`
+      SELECT e.student_id
+      FROM exam_forms e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.exam_year=$1 AND e.status='approved' AND e.payment_status='paid' AND s.status='approved'
+      GROUP BY e.student_id
+      ORDER BY e.student_id
+    `, [examYear])
+
+    const eligibleIds = eligible.rows.map(r => Number(r.student_id))
+    const selectedIds = targetScope === 'specific'
+      ? (Array.isArray(studentIds) ? studentIds.map(Number).filter(id => eligibleIds.includes(Number(id))) : [])
+      : eligibleIds
+
+    if (!selectedIds.length) {
+      return res.status(400).json({ error: 'No approved and paid students are available for this exam selection' })
+    }
+
+    const { rows } = await pool.query(`
+      INSERT INTO online_exams (exam_year, exam_date, start_time, end_time, topic, target_scope, student_ids, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, exam_year, exam_date::text AS exam_date, start_time, end_time,
+            topic, target_scope, student_ids, created_by, created_at
+    `, [examYear, examDate, startTime, endTime, String(topic).trim(), targetScope === 'specific' ? 'specific' : 'all', selectedIds, 'admin'])
+
+    res.status(201).json({ exam: rows[0] })
+  } catch (e) {
+    console.error('POST /api/admin/online-exams:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/admin/online-exams/:id/reschedule', auth('admin'), async (req, res) => {
+  const { examDate, startTime, endTime } = req.body || {}
+  if (!examDate || !startTime || !endTime) {
+    return res.status(400).json({ error: 'Exam date, start time and end time are required' })
+  }
+  if (startTime >= endTime) {
+    return res.status(400).json({ error: 'End time must be later than the start time' })
+  }
+
+  try {
+    const { rows } = await pool.query(`
+      UPDATE online_exams oe
+      SET exam_date = $2, start_time = $3, end_time = $4
+      WHERE oe.id = $1
+        AND CARDINALITY(oe.student_ids) > (
+          SELECT COUNT(*) FROM online_exam_submissions WHERE exam_id = oe.id
+        )
+      RETURNING oe.id, oe.exam_year, oe.exam_date::text AS exam_date, oe.start_time, oe.end_time,
+                oe.topic, oe.target_scope, oe.student_ids, oe.created_by, oe.created_at
+    `, [req.params.id, examDate, startTime, endTime])
+
+    if (!rows.length) {
+      const exists = await pool.query('SELECT id FROM online_exams WHERE id=$1', [req.params.id])
+      if (!exists.rows.length) return res.status(404).json({ error: 'Online exam not found' })
+      return res.status(409).json({ error: 'This exam cannot be rescheduled because all assigned students have submitted' })
+    }
+
+    res.json({ exam: rows[0] })
+  } catch (e) {
+    console.error('PATCH /api/admin/online-exams/:id/reschedule:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/admin/online-exams/:id/submissions', auth('admin'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT oes.*, s.full_name, s.reg_no
+      FROM online_exam_submissions oes
+      JOIN students s ON s.id = oes.student_id
+      WHERE oes.exam_id = $1
+      ORDER BY oes.submitted_at DESC
+    `, [req.params.id])
+    res.json({ submissions: rows })
+  } catch (e) {
+    console.error('GET /api/admin/online-exams/:id/submissions:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/student/online-exams', auth('student'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+            SELECT oe.id, oe.exam_year, oe.exam_date::text AS exam_date, oe.start_time, oe.end_time,
+              oe.topic, oe.target_scope, oe.student_ids, oe.created_by, oe.created_at,
+              ef.roll_no, ef.exam_class,
+             EXISTS (
+               SELECT 1 FROM online_exam_submissions oes
+               WHERE oes.exam_id = oe.id AND oes.student_id = $1
+             ) AS submitted,
+             (SELECT file_data FROM online_exam_submissions WHERE exam_id = oe.id AND student_id = $1) AS file_data
+      FROM online_exams oe
+      JOIN exam_forms ef ON ef.student_id = $1 AND ef.exam_year = oe.exam_year
+      WHERE ef.status = 'approved' AND ef.payment_status = 'paid'
+        AND (oe.target_scope = 'all' OR $1 = ANY(oe.student_ids))
+      ORDER BY oe.exam_date ASC, oe.start_time ASC
+    `, [req.user.id])
+    res.json({ exams: rows })
+  } catch (e) {
+    console.error('GET /api/student/online-exams:', e.message)
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/student/online-exams/:id/submit', auth('student'), async (req, res) => {
+  const { imageData, topic } = req.body || {}
+  if (!imageData || typeof imageData !== 'string') {
+    return res.status(400).json({ error: 'A valid image file is required' })
+  }
+  const fileType = /^data:image\/(png|jpeg|jpg);base64,/i
+  if (!fileType.test(imageData)) {
+    return res.status(400).json({ error: 'Only PNG, JPG and JPEG images are allowed' })
+  }
+
+  try {
+    const examCheck = await pool.query(`
+            SELECT oe.id, oe.exam_year, oe.exam_date::text AS exam_date, oe.start_time, oe.end_time,
+              oe.topic, oe.target_scope, oe.student_ids, oe.created_by, oe.created_at,
+              ef.roll_no, ef.exam_class, ef.student_id
+      FROM online_exams oe
+      JOIN exam_forms ef ON ef.student_id = $1 AND ef.exam_year = oe.exam_year
+      WHERE oe.id = $2 AND ef.status = 'approved' AND ef.payment_status = 'paid'
+        AND (oe.target_scope = 'all' OR $1 = ANY(oe.student_ids))
+    `, [req.user.id, req.params.id])
+
+    if (!examCheck.rows.length) {
+      return res.status(404).json({ error: 'No valid online exam assignment was found for this student' })
+    }
+
+    const exam = examCheck.rows[0]
+    const now = new Date()
+    const start = indiaDateTime(exam.exam_date, exam.start_time)
+    const end = indiaDateTime(exam.exam_date, exam.end_time)
+    if (now < start || now > end) {
+      return res.status(400).json({ error: 'This online exam is not currently live' })
+    }
+
+    const finalTopic = topic && String(topic).trim() ? String(topic).trim() : exam.topic
+    const { rows } = await pool.query(`
+      INSERT INTO online_exam_submissions (exam_id, student_id, roll_no, exam_class, topic, file_data)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (exam_id, student_id) DO UPDATE SET
+        roll_no = EXCLUDED.roll_no,
+        exam_class = EXCLUDED.exam_class,
+        topic = EXCLUDED.topic,
+        file_data = EXCLUDED.file_data,
+        submitted_at = now()
+      RETURNING *
+    `, [exam.id, req.user.id, exam.roll_no, exam.exam_class, finalTopic, imageData])
+
+    res.status(201).json({ submission: rows[0] })
+  } catch (e) {
+    console.error('POST /api/student/online-exams/:id/submit:', e.message)
     res.status(500).json({ error: e.message })
   }
 })
