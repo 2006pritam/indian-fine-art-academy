@@ -414,7 +414,7 @@ function Footer() {
 }
 
 export default function App() {
-  const [admissionOpen, setAdmissionOpen] = useState(false)
+  const [admissionOpen, setAdmissionOpen] = useState(() => new URLSearchParams(window.location.search).has('payment_exam'))
   const openAdmission = () => setAdmissionOpen(true)
   const closeAdmission = () => setAdmissionOpen(false)
 

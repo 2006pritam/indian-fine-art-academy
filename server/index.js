@@ -6,6 +6,8 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createPaymentGateway, createPaymentService, initPaymentSchema, mountPaymentRoutes } from './payments.js'
+import { initNoticeSchema, mountNoticeRoutes } from './notices.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(__dirname, '..', 'dist')
@@ -25,6 +27,14 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
 const PORT = process.env.PORT || 4000
+const PAYMENT_API_URL = process.env.PAYMENT_API_URL || 'https://famapi.mistahub.in/api'
+const PAYMENT_API_KEY = process.env.PAYMENT_API_KEY || ''
+const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || process.env.RENDER_EXTERNAL_URL || ''
+const payments = createPaymentService({
+  pool,
+  gateway: createPaymentGateway({ apiUrl: PAYMENT_API_URL, apiKey: PAYMENT_API_KEY }),
+  publicAppUrl: PUBLIC_APP_URL,
+})
 
 const app = express()
 app.use(cors())
@@ -110,11 +120,14 @@ async function init() {
     ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'approved';
   `)
 
-  // Payment status for exam forms. Fee is looked up live from exam_fees;
-  // this only tracks whether the admin has marked the form as paid.
+  // Keep the fee snapshot and payment confirmation with each exam form.
   await pool.query(`
     ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
   `)
+  await pool.query(`ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_method TEXT;`)
+  await pool.query(`ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_order_id TEXT;`)
+  await pool.query(`ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_amount NUMERIC(10,2);`)
+  await pool.query(`ALTER TABLE exam_forms ADD COLUMN IF NOT EXISTS payment_paid_at TIMESTAMPTZ;`)
 
   // Admit card release. admit_released flips true once the admin releases the
   // card (only for approved + paid forms); exam_datetime is the admin-typed
@@ -184,6 +197,8 @@ async function init() {
     await pool.query('INSERT INTO admins (admin_id, password_hash) VALUES ($1,$2)', [adminId, hash])
     console.log(`Seeded default admin "${adminId}"`)
   }
+  await initPaymentSchema(pool)
+  await initNoticeSchema(pool)
   console.log('Database ready.')
 }
 
@@ -209,6 +224,8 @@ const STUDENT_COLS =
   'id, reg_no, full_name, co_name, phone, email, aadhaar, dob, gender, address, current_class, photo, status, created_at'
 
 /* ---------------------------------------------------------------- routes */
+mountPaymentRoutes(app, auth, payments)
+mountNoticeRoutes(app, auth, pool)
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 // Admin login
@@ -420,6 +437,7 @@ async function generateRollNo(centerCode, examYear) {
 async function createExamForm(req, res, filledBy) {
   const b = req.body || {}
   const { regNo, examClass, examYear, centerCode, centerName } = b
+  const paymentMethod = filledBy === 'student' ? b.paymentMethod : 'cash'
   if (!regNo || !examClass || !examYear || !centerCode || !centerName)
     return res.status(400).json({ error: 'All fields are required' })
 
@@ -435,6 +453,12 @@ async function createExamForm(req, res, filledBy) {
     const stu = await pool.query('SELECT id, reg_no FROM students WHERE reg_no=$1', [regNo.trim()])
     if (!stu.rows.length) return res.status(404).json({ error: 'Student not found' })
     const student = stu.rows[0]
+    const feeResult = await pool.query('SELECT fee FROM exam_fees WHERE exam_class=$1', [examClass])
+    if (!feeResult.rows.length)
+      return res.status(400).json({ error: 'The exam fee has not been set for this class. Ask the admin to set it first.' })
+    const fee = Number(feeResult.rows[0].fee)
+    if (filledBy === 'student' && fee > 0 && !['upi', 'cash'].includes(paymentMethod))
+      return res.status(400).json({ error: 'Choose UPI or cash for payment' })
 
     // A student may only be permitted once per exam session (year)
     const dupYear = await pool.query(
@@ -447,10 +471,11 @@ async function createExamForm(req, res, filledBy) {
     const rollNo = await generateRollNo(centerCode.trim(), examYear)
     // Admin-filled forms are auto-approved; student-filled forms await approval.
     const status = filledBy === 'admin' ? 'approved' : 'pending'
+    const paymentStatus = fee === 0 ? 'paid' : paymentMethod === 'cash' ? 'cash_pending' : 'payment_pending'
     const { rows } = await pool.query(
-      `INSERT INTO exam_forms (student_id, reg_no, roll_no, exam_class, exam_year, center_code, center_name, filled_by, status, payment_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'unpaid') RETURNING *`,
-      [student.id, student.reg_no, rollNo, examClass, examYear, centerCode.trim(), centerName.trim(), filledBy, status]
+      `INSERT INTO exam_forms (student_id, reg_no, roll_no, exam_class, exam_year, center_code, center_name, filled_by, status, payment_status, payment_method, payment_amount, payment_paid_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CASE WHEN $10='paid' THEN now() ELSE NULL END) RETURNING *`,
+      [student.id, student.reg_no, rollNo, examClass, examYear, centerCode.trim(), centerName.trim(), filledBy, status, paymentStatus, paymentMethod || null, fee]
     )
     res.status(201).json({ exam: rows[0] })
   } catch (e) {
@@ -538,24 +563,6 @@ app.patch('/api/admin/exams/:id/status', auth('admin'), async (req, res) => {
     res.json({ exam: rows[0] })
   } catch (e) {
     console.error('PATCH /api/admin/exams status:', e.message)
-    res.status(500).json({ error: e.message })
-  }
-})
-
-// Mark an exam form paid / unpaid (admin)
-app.patch('/api/admin/exams/:id/payment', auth('admin'), async (req, res) => {
-  const { paymentStatus } = req.body || {}
-  if (!['paid', 'unpaid'].includes(paymentStatus))
-    return res.status(400).json({ error: 'Payment status must be paid or unpaid' })
-  try {
-    const { rows } = await pool.query(
-      'UPDATE exam_forms SET payment_status=$1 WHERE id=$2 RETURNING *',
-      [paymentStatus, req.params.id]
-    )
-    if (!rows.length) return res.status(404).json({ error: 'Not found' })
-    res.json({ exam: rows[0] })
-  } catch (e) {
-    console.error('PATCH /api/admin/exams payment:', e.message)
     res.status(500).json({ error: e.message })
   }
 })
@@ -865,6 +872,8 @@ app.get(/^(?!\/api).*/, (req, res) => {
 init()
   .then(() => {
     const server = app.listen(PORT, () => console.log(`API listening on http://localhost:${PORT}`))
+    const stopPayments = payments.startReconciliation()
+    server.on('close', stopPayments)
     server.on('error', (e) => {
       if (e.code === 'EADDRINUSE') {
         console.error(`Port ${PORT} already in use. Kill the old process and retry.`)

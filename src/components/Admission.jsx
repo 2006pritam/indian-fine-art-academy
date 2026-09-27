@@ -1,16 +1,69 @@
 import React, { useState, useEffect, useRef } from 'react'
 import Logo from './Logo.jsx'
 import { useNotification } from './NotificationBanner.jsx'
+import { AdminNotices, StudentNoticeBoard } from './Notices.jsx'
 
-const api = async (path, { method = 'GET', body, token } = {}) => {
+const api = async (path, { method = 'GET', body, token, signal } = {}) => {
   const res = await fetch(path, {
     method,
+    signal,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(data.error || 'Something went wrong')
   return data
+}
+
+function paymentNotice(exam) {
+  if (exam.payment_manual_override) return { type: 'info', title: 'Payment updated by admin', message: `The academy has marked this fee ${exam.payment_status}. Contact the academy if it needs correcting.` }
+  if (exam.payment_status === 'paid') return { type: 'success', title: 'Payment confirmed', message: 'Your UPI payment has been confirmed and saved.' }
+  if (exam.payment_status === 'payment_failed') return { type: 'warning', title: 'Payment not completed', message: 'The gateway reports this payment as failed or cancelled. If money was deducted, contact the academy before retrying.' }
+  return { type: 'info', title: 'Payment pending', message: 'We will keep checking for confirmation. If money was deducted, wait or ask the academy to verify it before paying again.' }
+}
+
+// Recheck while the portal is open, including after switching back from a UPI app.
+function usePaymentRefresh(exams, token, onUpdate) {
+  const { notify } = useNotification()
+  const updateRef = useRef(onUpdate)
+  updateRef.current = onUpdate
+  const ids = JSON.stringify(exams.filter(e => e.payment_method === 'upi' && e.payment_order_id && e.payment_status !== 'paid' && !e.payment_manual_override).map(e => e.id))
+  useEffect(() => {
+    const pendingIds = JSON.parse(ids)
+    if (!pendingIds.length) return
+    const controller = new AbortController()
+    let timer, checking = false
+    const check = async () => {
+      if (checking || controller.signal.aborted) return
+      clearTimeout(timer)
+      checking = true
+      try {
+        if (document.visibilityState !== 'hidden') {
+          for (const id of pendingIds) {
+            try {
+              const data = await api(`/api/student/exams/${id}/payment/status`, { method: 'POST', token, signal: controller.signal })
+              if (controller.signal.aborted) return
+              updateRef.current(data.exam)
+              if (data.exam.payment_status === 'paid') notify(paymentNotice(data.exam))
+            } catch { /* Manual checks report errors; automatic checks retry quietly. */ }
+            if (controller.signal.aborted) return
+          }
+        }
+      } finally {
+        checking = false
+        if (!controller.signal.aborted) timer = window.setTimeout(check, 15000)
+      }
+    }
+    void check()
+    window.addEventListener('focus', check)
+    document.addEventListener('visibilitychange', check)
+    return () => {
+      controller.abort()
+      clearTimeout(timer)
+      window.removeEventListener('focus', check)
+      document.removeEventListener('visibilitychange', check)
+    }
+  }, [ids, token, notify])
 }
 
 const EMPTY = { fullName: '', coName: '', phone: '', email: '', aadhaar: '', dob: '', gender: '', address: '', currentClass: '', photo: '' }
@@ -101,8 +154,9 @@ function StatusBadge({ status }) {
 }
 
 function PayBadge({ status }) {
-  const s = status === 'paid' ? 'paid' : 'unpaid'
-  return <span className={`pay-badge pay-badge--${s}`}>{s === 'paid' ? 'Paid' : 'Unpaid'}</span>
+  const labels = { paid: 'Paid', cash_pending: 'Cash pending', payment_pending: 'UPI pending', payment_failed: 'Payment failed', unpaid: 'Unpaid' }
+  const s = status || 'unpaid'
+  return <span className={`pay-badge pay-badge--${s}`}>{labels[s] || s}</span>
 }
 
 function fileToDataUrl(file, max = 400) {
@@ -693,6 +747,10 @@ function ExamForm({ session, mode, fixedStudent }) {
   const [openYears, setOpenYears] = useState([])
   const [fees, setFees] = useState({}) // { [exam_class]: fee }
   const [agree, setAgree] = useState(false)
+  const [paymentMethod, setPaymentMethod] = useState('upi')
+  const [paymentBusy, setPaymentBusy] = useState(false)
+  const [paymentErr, setPaymentErr] = useState('')
+  usePaymentRefresh(mode === 'student' && result ? [result] : [], session.token, exam => setResult(previous => ({ ...previous, ...exam })))
 
   // Auto-load own profile in student mode
   useEffect(() => {
@@ -737,7 +795,7 @@ function ExamForm({ session, mode, fixedStudent }) {
     e.preventDefault(); setErr(''); setBusy(true)
     try {
       const path = mode === 'admin' ? '/api/admin/exams' : '/api/student/exams'
-      const body = { regNo, examClass, examYear, centerCode, centerName }
+      const body = { regNo, examClass, examYear, centerCode, centerName, ...(mode === 'student' ? { paymentMethod } : {}) }
       const d = await api(path, { method: 'POST', body, token: session.token })
       setResult(d.exam)
       notify({ type: 'success', title: 'Exam form submitted', message: `Roll number ${d.exam.roll_no} was generated successfully.` })
@@ -745,6 +803,27 @@ function ExamForm({ session, mode, fixedStudent }) {
       setErr(e.message)
       notify({ type: 'error', title: 'Submission failed', message: e.message })
     } finally { setBusy(false) }
+  }
+
+  const startPayment = async () => {
+    setPaymentErr(''); setPaymentBusy(true)
+    try {
+      const d = await api(`/api/student/exams/${result.id}/payment`, { method: 'POST', token: session.token })
+      setResult(p => ({ ...p, ...d.exam }))
+      if (d.paid) return
+      window.location.href = d.checkoutUrl
+    } catch (e) { setPaymentErr(e.message) }
+    finally { setPaymentBusy(false) }
+  }
+
+  const verifyPayment = async () => {
+    setPaymentErr(''); setPaymentBusy(true)
+    try {
+      const d = await api(`/api/student/exams/${result.id}/payment/status`, { method: 'POST', token: session.token })
+      setResult(p => ({ ...p, ...d.exam }))
+      notify(paymentNotice(d.exam))
+    } catch (e) { setPaymentErr(e.message) }
+    finally { setPaymentBusy(false) }
   }
 
   if (result) return (
@@ -761,9 +840,22 @@ function ExamForm({ session, mode, fixedStudent }) {
         <div><small>Center Code</small><strong>{result.center_code}</strong></div>
         <div><small>Center Name</small><strong>{result.center_name}</strong></div>
         <div><small>Exam Fee</small><strong>{feeAmount === undefined ? '—' : feeAmount > 0 ? `₹${feeAmount}` : 'Free'}</strong></div>
-        <div><small>Payment</small><strong>Unpaid — pay at the academy</strong></div>
+        <div><small>Payment</small><strong><PayBadge status={result.payment_status} /></strong></div>
       </div>
-      <p className="ds-note">Your form is <strong>pending admin approval</strong>. Once the admin verifies your payment and details, it will show as Approved.</p>
+      {paymentErr && <p className="auth__err">{paymentErr}</p>}
+      {mode === 'student' && result.payment_method === 'upi' && result.payment_status !== 'paid' && !result.payment_manual_override && (
+        <div className="reg-form__actions">
+          {result.payment_order_id && <button type="button" className="btn btn--outline" onClick={verifyPayment} disabled={paymentBusy}>{paymentBusy ? 'Checking…' : 'Check UPI Payment'}</button>}
+          <button type="button" className="btn" onClick={startPayment} disabled={paymentBusy}>{paymentBusy ? 'Opening…' : result.payment_status === 'payment_failed' ? 'Retry UPI Payment' : 'Pay with UPI'}</button>
+        </div>
+      )}
+      <p className="ds-note">{result.payment_manual_override
+        ? <>Payment status was set by an admin. Contact the academy for any correction.</>
+        : result.payment_method === 'cash' && result.payment_status !== 'paid'
+        ? <>Cash selected. An admin must accept the cash payment before this form becomes paid.</>
+        : result.payment_status === 'payment_failed'
+          ? <>The UPI payment failed or was cancelled. If money was deducted, ask the academy to verify it before retrying.</>
+          : <>UPI payments are confirmed automatically after gateway verification. Exam approval is shown separately.</>}</p>
       <button className="btn" onClick={() => { setResult(null); setExamYear(''); setCenterCode(''); setCenterName(''); setAgree(false) }}>Fill Another</button>
     </div>
   )
@@ -839,10 +931,19 @@ function ExamForm({ session, mode, fixedStudent }) {
                 <span className="exam-fee__amount">
                   {feeAmount === undefined ? 'Not set' : feeAmount > 0 ? `₹${feeAmount}` : 'Free'}
                 </span>
-                <small className="exam-fee__note">Payable at the academy. Your form is confirmed once the admin verifies payment.</small>
+                <small className="exam-fee__note">{feeAmount === undefined ? 'Ask the admin to set the exam fee before submitting.' : 'Choose UPI for automatic confirmation or cash for admin acceptance.'}</small>
               </div>
             )}
           </div>
+          {mode === 'student' && feeAmount > 0 && (
+            <div className="reg-form__section">
+              <h4>Payment Method</h4>
+              <div className="reg-form__grid">
+                <label><input type="radio" name="paymentMethod" value="upi" checked={paymentMethod === 'upi'} onChange={e => setPaymentMethod(e.target.value)} /> UPI (online, auto-confirmed)</label>
+                <label><input type="radio" name="paymentMethod" value="cash" checked={paymentMethod === 'cash'} onChange={e => setPaymentMethod(e.target.value)} /> Cash (admin accepts manually)</label>
+              </div>
+            </div>
+          )}
           <div className="reg-form__section">
             <h4>Examination Center</h4>
             <div className="reg-form__grid">
@@ -966,6 +1067,7 @@ function AdminDashboard({ session, onLogout }) {
   const [newYear, setNewYear] = useState('')
   const [fees, setFees] = useState({}) // { [class]: amount }
   const [feeSaved, setFeeSaved] = useState('')
+  const [paymentBusyId, setPaymentBusyId] = useState(null)
   // Attendance page: optional exam-year filter ('' = all sessions)
   const [attYear, setAttYear] = useState('')
   // Admit release form
@@ -997,6 +1099,18 @@ function AdminDashboard({ session, onLogout }) {
       .then(d => setExams(d.exams))
       .catch(e => setErr(e.message))
   }
+
+  useEffect(() => {
+    if (page !== 'exams' || paymentBusyId !== null) return
+    const controller = new AbortController()
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return
+      api('/api/admin/exams', { token: session.token, signal: controller.signal })
+        .then(d => { if (!controller.signal.aborted) setExams(d.exams) })
+        .catch(() => {})
+    }, 15000)
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [page, paymentBusyId, session.token])
 
   const loadSessions = () => {
     api('/api/exam-sessions')
@@ -1098,11 +1212,13 @@ function AdminDashboard({ session, onLogout }) {
   }
 
   const setExamPayment = async (id, paymentStatus) => {
+    setErr(''); setPaymentBusyId(id)
     try {
       const d = await api(`/api/admin/exams/${id}/payment`, { method: 'PATCH', body: { paymentStatus }, token: session.token })
-      setExams(p => p.map(e => e.id === id ? d.exam : e))
+      setExams(p => p.map(e => e.id === id ? { ...e, ...d.exam } : e))
       notify({ type: 'success', title: 'Payment updated', message: `Exam fee marked ${paymentStatus}.` })
     } catch (e) { setErr(e.message) }
+    finally { setPaymentBusyId(null) }
   }
 
   // Mark a student present / absent on an approved exam form.
@@ -1198,6 +1314,7 @@ function AdminDashboard({ session, onLogout }) {
 
   const MENU = [
     { id: 'home', icon: '🏠', label: 'Dashboard' },
+    { id: 'notices', icon: '📢', label: 'Notices' },
     { id: 'students', icon: '👥', label: 'All Students' },
     { id: 'register', icon: '📝', label: 'Registration' },
     { id: 'share', icon: '🔗', label: 'Share Link' },
@@ -1241,6 +1358,7 @@ function AdminDashboard({ session, onLogout }) {
           </button>
           <h1 className="ds-topbar__title">
             {page === 'home' && 'Dashboard'}
+            {page === 'notices' && 'Student Notices'}
             {page === 'students' && 'All Students'}
             {page === 'register' && 'New Registration'}
             {page === 'share' && 'Share Registration Link'}
@@ -1258,6 +1376,7 @@ function AdminDashboard({ session, onLogout }) {
         </header>
 
         <div className="ds-content">
+          {page === 'notices' && <AdminNotices token={session.token} />}
           {/* Home */}
           {page === 'home' && (
             <div>
@@ -1426,9 +1545,17 @@ function AdminDashboard({ session, onLogout }) {
                         </td>
                         <td>
                           <PayBadge status={e.payment_status} />
-                          <button className="btn btn--xs" onClick={() => setExamPayment(e.id, e.payment_status === 'paid' ? 'unpaid' : 'paid')}>
-                            {e.payment_status === 'paid' ? 'Mark Unpaid' : 'Mark Paid'}
-                          </button>
+                          <small>{e.payment_method === 'upi' ? 'UPI' : e.payment_method === 'cash' ? 'Cash' : '—'}</small>
+                          {e.payment_order_id && <small>Order: {e.payment_order_id}</small>}
+                          {e.payment_manual_override && <small>Set by admin</small>}
+                          {e.payment_status !== 'paid' && (
+                            <button className="btn btn--xs btn--approve" onClick={() => setExamPayment(e.id, 'paid')} disabled={paymentBusyId !== null}>
+                              {e.payment_method === 'cash' ? 'Accept Cash' : 'Mark paid'}
+                            </button>
+                          )}
+                          {e.payment_status !== 'unpaid' && (
+                            <button className="btn btn--xs" onClick={() => setExamPayment(e.id, 'unpaid')} disabled={paymentBusyId !== null}>Mark unpaid</button>
+                          )}
                         </td>
                         <td>
                           {e.admit_released
@@ -1739,14 +1866,19 @@ function AdminDashboard({ session, onLogout }) {
 
 /* ─── Student Dashboard ─────────────────────────────────────────────────── */
 function StudentDashboard({ session, onLogout }) {
+  const { notify } = useNotification()
   const [student, setStudent] = useState(session.user)
   const [sideOpen, setSideOpen] = useState(false)
-  const [page, setPage] = useState('profile') // profile | exam | exams
+  const [page, setPage] = useState(() => new URLSearchParams(window.location.search).has('payment_exam') ? 'exams' : 'profile')
   const [exams, setExams] = useState([])
   const [openYears, setOpenYears] = useState([])
   const [admitIdx, setAdmitIdx] = useState(0)
   const [resultIdx, setResultIdx] = useState(0)
   const [results, setResults] = useState([])
+  const [paymentRetryId, setPaymentRetryId] = useState(null)
+  const [paymentCheckId, setPaymentCheckId] = useState(null)
+  const updatePayment = exam => setExams(previous => previous.map(item => item.id === exam.id ? { ...item, ...exam } : item))
+  usePaymentRefresh(exams, session.token, updatePayment)
 
   useEffect(() => {
     api('/api/student/me', { token: session.token })
@@ -1766,7 +1898,52 @@ function StudentDashboard({ session, onLogout }) {
       .catch(() => {})
   }
 
+  const retryPayment = async exam => {
+    setPaymentRetryId(exam.id)
+    try {
+      const d = await api(`/api/student/exams/${exam.id}/payment`, { method: 'POST', token: session.token })
+      updatePayment(d.exam)
+      if (d.paid) {
+        notify(paymentNotice(d.exam))
+        return
+      }
+      window.location.href = d.checkoutUrl
+    } catch (e) {
+      notify({ type: 'error', title: 'Payment could not start', message: e.message })
+    } finally {
+      setPaymentRetryId(null)
+    }
+  }
+
+  const checkPayment = async exam => {
+    setPaymentCheckId(exam.id)
+    try {
+      const d = await api(`/api/student/exams/${exam.id}/payment/status`, { method: 'POST', token: session.token })
+      updatePayment(d.exam)
+      notify(paymentNotice(d.exam))
+    } catch (error) {
+      notify({ type: 'error', title: 'Payment check failed', message: error.message })
+    } finally { setPaymentCheckId(null) }
+  }
+
   useEffect(() => { loadExams(); loadResults() }, [])
+  useEffect(() => {
+    const examId = new URLSearchParams(window.location.search).get('payment_exam')
+    if (!examId) return
+    setPage('exams')
+    const controller = new AbortController()
+    api(`/api/student/exams/${encodeURIComponent(examId)}/payment/status`, { method: 'POST', token: session.token, signal: controller.signal })
+      .then(d => { if (!controller.signal.aborted) { updatePayment(d.exam); notify(paymentNotice(d.exam)) } })
+      .catch(e => { if (!controller.signal.aborted) notify({ type: 'error', title: 'Payment check failed', message: e.message }) })
+      .finally(() => {
+        if (controller.signal.aborted) return
+        const url = new URL(window.location.href)
+        url.searchParams.delete('payment_exam')
+        window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+        loadExams()
+      })
+    return () => controller.abort()
+  }, [session.token])
   useEffect(() => { if (page === 'exams' || page === 'exam' || page === 'admit') loadExams() }, [page])
   useEffect(() => { if (page === 'exam') api('/api/exam-sessions').then(d => setOpenYears(d.sessions)).catch(() => {}) }, [page])
   useEffect(() => { if (page === 'results') loadResults() }, [page])
@@ -1832,6 +2009,7 @@ function StudentDashboard({ session, onLogout }) {
           <span className="ds-topbar__user">👤 {s.full_name}</span>
         </header>
         <div className="ds-content">
+          <StudentNoticeBoard token={session.token} />
           {page === 'profile' && (
             <>
               {s.reg_no && (
@@ -1945,9 +2123,9 @@ function StudentDashboard({ session, onLogout }) {
               </div>
               <div className="ds-table-wrap">
                 <table className="ds-table">
-                  <thead><tr><th>Roll No</th><th>Class</th><th>Session</th><th>Center</th><th>Status</th><th>Payment</th></tr></thead>
+                  <thead><tr><th>Roll No</th><th>Class</th><th>Session</th><th>Center</th><th>Status</th><th>Payment</th><th></th></tr></thead>
                   <tbody>
-                    {exams.length === 0 && <tr><td colSpan="6" className="ds-empty-cell">You have no exam forms yet.</td></tr>}
+                    {exams.length === 0 && <tr><td colSpan="7" className="ds-empty-cell">You have no exam forms yet.</td></tr>}
                     {exams.map(e => (
                       <tr key={e.id}>
                         <td><strong>{e.roll_no}</strong></td>
@@ -1955,12 +2133,26 @@ function StudentDashboard({ session, onLogout }) {
                         <td>{e.exam_year}</td>
                         <td>{e.center_name} <small>({e.center_code})</small></td>
                         <td><StatusBadge status={e.status} /></td>
-                        <td><PayBadge status={e.payment_status} /></td>
+                        <td>
+                          <PayBadge status={e.payment_status} />
+                          {e.payment_manual_override && <small>Set by admin. Contact the academy for corrections.</small>}
+                        </td>
+                        <td>
+                          {e.payment_method === 'upi' && e.payment_status !== 'paid' && !e.payment_manual_override && (
+                            <>
+                              {e.payment_order_id && <button type="button" className="btn btn--xs btn--outline" onClick={() => checkPayment(e)} disabled={paymentCheckId !== null || paymentRetryId !== null}>{paymentCheckId === e.id ? 'Checking…' : 'Check payment'}</button>}
+                              <button type="button" className="btn btn--xs" onClick={() => retryPayment(e)} disabled={paymentRetryId !== null || paymentCheckId !== null}>
+                                {paymentRetryId === e.id ? 'Opening…' : e.payment_status === 'payment_failed' ? 'Retry payment' : e.payment_order_id ? 'Continue payment' : 'Pay now'}
+                              </button>
+                            </>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+              <p className="ds-note">UPI payments update automatically after confirmation. If money was deducted but the fee still shows unpaid, ask the academy admin to verify it and mark it paid.</p>
             </div>
           )}
 

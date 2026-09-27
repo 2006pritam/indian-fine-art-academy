@@ -28,3 +28,10 @@ services:
         value: "5050"
       - key: NODE_VERSION
         value: "22"
+      # Payment gateway settings. Add the replacement secret in Render, never in git.
+      - key: PAYMENT_API_KEY
+        sync: false
+      - key: PAYMENT_API_URL
+        value: https://famapi.mistahub.in/api
+      - key: PUBLIC_APP_URL
+        sync: false
