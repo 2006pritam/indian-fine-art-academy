@@ -28,12 +28,13 @@ const pool = new Pool({
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret'
 const PORT = process.env.PORT || 4000
 const indiaDateTime = (date, time) => new Date(`${date}T${time}+05:30`)
-const PAYMENT_API_URL = process.env.PAYMENT_API_URL || 'https://famapi.mistahub.in/api'
+const PAYMENT_API_URL = process.env.PAYMENT_API_URL || 'https://upi-gateway-iizu.onrender.com/api'
 const PAYMENT_API_KEY = process.env.PAYMENT_API_KEY || ''
+const PAYMENT_API_SECRET = process.env.PAYMENT_API_SECRET || ''
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || process.env.RENDER_EXTERNAL_URL || ''
 const payments = createPaymentService({
   pool,
-  gateway: createPaymentGateway({ apiUrl: PAYMENT_API_URL, apiKey: PAYMENT_API_KEY }),
+  gateway: createPaymentGateway({ apiUrl: PAYMENT_API_URL, apiKey: PAYMENT_API_KEY, apiSecret: PAYMENT_API_SECRET }),
   publicAppUrl: PUBLIC_APP_URL,
 })
 

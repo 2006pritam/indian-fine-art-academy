@@ -28,10 +28,13 @@ services:
         value: "5050"
       - key: NODE_VERSION
         value: "22"
-      # Payment gateway settings. Add the replacement secret in Render, never in git.
+      # UPI gateway (github.com/2006pritam/upi_gateway). Paste the key and secret from the
+      # gateway's Settings page in the Render dashboard, never in git.
       - key: PAYMENT_API_KEY
         sync: false
+      - key: PAYMENT_API_SECRET
+        sync: false
       - key: PAYMENT_API_URL
-        value: https://famapi.mistahub.in/api
+        value: https://upi-gateway-iizu.onrender.com/api
       - key: PUBLIC_APP_URL
         sync: false

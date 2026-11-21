@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 export class PaymentError extends Error {
   constructor(message, status = 502) {
     super(message)
@@ -7,7 +9,8 @@ export class PaymentError extends Error {
 
 const PAID = new Set(['paid', 'success', 'successful', 'completed', 'complete'])
 const FAILED = new Set(['failed', 'failure', 'payment_failed', 'cancelled', 'canceled', 'rejected', 'expired', 'declined'])
-const PENDING = new Set(['pending', 'created', 'initiated', 'processing', 'in_progress', 'unpaid', 'payment_pending'])
+// 'review' = the customer typed a UTR and the merchant has not confirmed it yet.
+const PENDING = new Set(['pending', 'created', 'initiated', 'processing', 'in_progress', 'unpaid', 'payment_pending', 'review'])
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 
 // A wrapper's "success" describes the API request, not the payment inside it.
@@ -37,17 +40,23 @@ export function gatewayPaymentStatus(data, order) {
   throw new PaymentError('The gateway has not returned a valid payment status. Please check again shortly.')
 }
 
-export function createPaymentGateway({ apiUrl, apiKey, fetchImpl = fetch }) {
+// Talks to the UPI gateway (https://github.com/2006pritam/upi_gateway):
+//   POST {apiUrl}/v1/orders      create an order, returns data.payment_url (hosted UPI page)
+//   GET  {apiUrl}/v1/orders/:id  current status (pending | review | paid | expired)
+// Auth is the merchant's X-Api-Key / X-Api-Secret pair. Keep both on the server only.
+export function createPaymentGateway({ apiUrl, apiKey, apiSecret, fetchImpl = fetch }) {
   const key = (apiKey || '').trim()
-  const configured = Boolean(key) && !/(^|[\\/])\.env(?:\.[\w-]+)?$/i.test(key)
-  const base = (apiUrl || 'https://famapi.mistahub.in/api').replace(/\/+$/, '')
+  const secret = (apiSecret || '').trim()
+  const looksLikePath = value => /(^|[\\/])\.env(?:\.[\w-]+)?$/i.test(value)
+  const configured = Boolean(key) && Boolean(secret) && !looksLikePath(key) && !looksLikePath(secret)
+  const base = (apiUrl || 'https://upi-gateway-iizu.onrender.com/api').replace(/\/+$/, '')
   async function request(endpoint, body) {
     if (!configured) throw new PaymentError('Online payment is not configured. Please contact the academy.', 503)
     let response, data
     try {
       response = await fetchImpl(`${base}${endpoint}`, {
         method: body ? 'POST' : 'GET',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        headers: { 'X-Api-Key': key, 'X-Api-Secret': secret, 'Content-Type': 'application/json', Accept: 'application/json' },
         ...(body ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(15000),
       })
@@ -55,13 +64,30 @@ export function createPaymentGateway({ apiUrl, apiKey, fetchImpl = fetch }) {
     } catch {
       throw new PaymentError('The payment gateway is unavailable. Please check again shortly.')
     }
-    if (!response.ok) throw new PaymentError('The payment gateway could not complete the request. Please try again or contact the academy.')
+    if (!response.ok) {
+      const error = new PaymentError('The payment gateway could not complete the request. Please try again or contact the academy.')
+      error.detail = data
+      throw error
+    }
     return data
   }
   return {
     configured,
-    async create(amount, redirectUrl) {
-      const data = payload(await request('/create-order', { amount, redirect_url: redirectUrl }))
+    async create(amount, redirectUrl, { clientOrderId } = {}) {
+      // The gateway needs a unique, URL-safe reference per order and only accepts https return URLs.
+      const body = { amount, client_order_id: clientOrderId || `FA${randomUUID().replaceAll('-', '').slice(0, 24)}` }
+      if (redirectUrl && /^https:\/\//i.test(redirectUrl)) body.redirect_url = redirectUrl
+      let data
+      try {
+        data = payload(await request('/v1/orders', body))
+      } catch (error) {
+        // Return URL domain not allowed in the gateway's Settings: still take the payment;
+        // the portal checks the status itself, so the student just is not auto-redirected.
+        if (body.redirect_url && error?.detail?.errors?.redirect_url) {
+          delete body.redirect_url
+          data = payload(await request('/v1/orders', body))
+        } else throw error
+      }
       const orderId = data.order_id ?? data.orderId ?? data.id
       const checkoutUrl = data.checkout_url ?? data.checkoutUrl ?? data.payment_url ?? data.paymentUrl ?? data.url
       let url
@@ -70,7 +96,7 @@ export function createPaymentGateway({ apiUrl, apiKey, fetchImpl = fetch }) {
       return { orderId: String(orderId), checkoutUrl: url.href }
     },
     async status(order) {
-      return gatewayPaymentStatus(await request(`/status/${encodeURIComponent(order.order_id)}`), order)
+      return gatewayPaymentStatus(await request(`/v1/orders/${encodeURIComponent(order.order_id)}`), order)
     },
   }
 }
@@ -179,7 +205,7 @@ export function createPaymentService({ pool, gateway, publicAppUrl }) {
           if (!['https:', 'http:'].includes(redirectUrl.protocol)) throw new Error()
           redirectUrl.searchParams.set('payment_exam', String(exam.id))
         } catch { throw new PaymentError('The payment return URL is not configured correctly. Contact the academy.', 503) }
-        const order = await gateway.create(Number(exam.payment_amount), redirectUrl.href)
+        const order = await gateway.create(Number(exam.payment_amount), redirectUrl.href, { clientOrderId: `EXAM${exam.id}-${Date.now().toString(36)}` })
         await client.query('INSERT INTO payment_orders (order_id, exam_form_id, amount, checkout_url) VALUES ($1,$2,$3,$4)', [order.orderId, exam.id, exam.payment_amount, order.checkoutUrl])
         const { rows } = await client.query(`UPDATE exam_forms SET payment_order_id=$1, payment_status='payment_pending',
           payment_paid_at=NULL, payment_checked_at=now() WHERE id=$2 RETURNING *`, [order.orderId, exam.id])

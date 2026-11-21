@@ -40,7 +40,7 @@ beforeEach(async () => {
   await pool.query('TRUNCATE payment_orders, exam_forms, admins RESTART IDENTITY CASCADE; INSERT INTO admins DEFAULT VALUES;')
   replies = new Map(); requests = []; created = 0
   gateway = createPaymentGateway({
-    apiUrl: 'https://gateway.example/api/', apiKey: 'test-key',
+    apiUrl: 'https://gateway.example/api/', apiKey: 'test-key', apiSecret: 'test-secret',
     async fetchImpl(url, options) {
       requests.push({ url, ...options })
       if (options.method === 'POST') {
@@ -86,11 +86,11 @@ test('rejects a confirmation for another order, amount, currency, or unknown sta
 
 test('missing configuration, unsafe checkout URLs, and gateway failures produce useful errors', async () => {
   for (const apiKey of ['', 'indian-fine-art-academy/.env']) {
-    const missing = createPaymentGateway({ apiKey, fetchImpl: () => assert.fail('must not contact gateway') })
+    const missing = createPaymentGateway({ apiKey, apiSecret: 'secret', fetchImpl: () => assert.fail('must not contact gateway') })
     await assert.rejects(missing.create(250, 'https://academy.example'), { status: 503 })
   }
   for (const checkout of ['javascript:alert(1)', 'http://checkout.example', 'https://user:secret@checkout.example', null]) {
-    const invalid = createPaymentGateway({ apiKey: 'key', fetchImpl: async () => Response.json({ order_id: 'x', checkout_url: checkout }) })
+    const invalid = createPaymentGateway({ apiKey: 'key', apiSecret: 'secret', fetchImpl: async () => Response.json({ order_id: 'x', checkout_url: checkout }) })
     await assert.rejects(invalid.create(250, 'https://academy.example'), /invalid checkout/)
   }
   for (const fetchImpl of [
@@ -98,7 +98,7 @@ test('missing configuration, unsafe checkout URLs, and gateway failures produce 
     async () => new Response('not JSON'),
     async () => Response.json({ error: 'bad secret' }, { status: 401 }),
   ]) {
-    const failed = createPaymentGateway({ apiKey: 'key', fetchImpl })
+    const failed = createPaymentGateway({ apiKey: 'key', apiSecret: 'secret', fetchImpl })
     await assert.rejects(failed.status(expectedOrder), { status: 502 })
   }
 })
@@ -110,8 +110,13 @@ test('starts one checkout, reuses pending orders, and confirms payment before a 
   assert.equal(first.orderId, again.orderId)
   assert.equal(created, 1)
   const request = requests.find(item => item.method === 'POST')
-  assert.deepEqual(JSON.parse(request.body), { amount: 250, redirect_url: `https://academy.example/?from=upi&payment_exam=${e.id}#portal` })
-  assert.equal(request.headers.Authorization, 'Bearer test-key')
+  const sent = JSON.parse(request.body)
+  assert.equal(request.url, 'https://gateway.example/api/v1/orders')
+  assert.equal(sent.amount, 250)
+  assert.equal(sent.redirect_url, `https://academy.example/?from=upi&payment_exam=${e.id}#portal`)
+  assert.match(sent.client_order_id, /^EXAM\d+-[a-z0-9]+$/)
+  assert.equal(request.headers['X-Api-Key'], 'test-key')
+  assert.equal(request.headers['X-Api-Secret'], 'test-secret')
   replies.set(first.orderId, { status: 'success', data: { payment_status: 'paid', amount: 250, order_id: first.orderId } })
   assert.equal((await service.start(e.id, 11)).paid, true)
   assert.equal(created, 1)
@@ -275,4 +280,42 @@ test('payment routes require the appropriate role and return the persisted exam'
     assert.equal((await response.json()).exam.payment_status, 'paid')
     assert.equal((await saved(e.id)).payment_status, 'paid')
   } finally { await new Promise(resolve => server.close(resolve)) }
+})
+
+test('understands the UPI gateway order statuses', () => {
+  const order = { order_id: 'ORDABC', amount: 250 }
+  const reply = status => ({ success: true, data: { order_id: 'ORDABC', amount: '250.00', currency: 'INR', status } })
+  assert.equal(gatewayPaymentStatus(reply('paid'), order), 'paid')
+  assert.equal(gatewayPaymentStatus(reply('pending'), order), 'payment_pending')
+  assert.equal(gatewayPaymentStatus(reply('review'), order), 'payment_pending')
+  assert.equal(gatewayPaymentStatus(reply('expired'), order), 'payment_failed')
+  assert.throws(() => gatewayPaymentStatus({ success: true, data: { order_id: 'OTHER', amount: '250.00', currency: 'INR', status: 'paid' } }, order), PaymentError)
+  assert.throws(() => gatewayPaymentStatus({ success: true, data: { order_id: 'ORDABC', amount: '1.00', currency: 'INR', status: 'paid' } }, order), PaymentError)
+})
+
+test('retries without the return URL when the gateway does not allow its domain', async () => {
+  const bodies = []
+  const lenient = createPaymentGateway({
+    apiUrl: 'https://gateway.example/api', apiKey: 'k', apiSecret: 's',
+    async fetchImpl(url, options) {
+      const body = JSON.parse(options.body)
+      bodies.push(body)
+      if (body.redirect_url) return Response.json({ message: 'invalid', errors: { redirect_url: ['not allowed'] } }, { status: 422 })
+      return Response.json({ success: true, data: { order_id: 'ORDX', payment_url: 'https://gateway.example/pay/ORDX' } }, { status: 201 })
+    },
+  })
+  const order = await lenient.create(250, 'https://academy.example/', { clientOrderId: 'EXAM1-a' })
+  assert.deepEqual(order, { orderId: 'ORDX', checkoutUrl: 'https://gateway.example/pay/ORDX' })
+  assert.equal(bodies.length, 2)
+  assert.equal(bodies[1].redirect_url, undefined)
+})
+
+test('does not send a non-https return URL to the gateway', async () => {
+  let sent
+  const gw = createPaymentGateway({
+    apiUrl: 'https://gateway.example/api', apiKey: 'k', apiSecret: 's',
+    async fetchImpl(url, options) { sent = JSON.parse(options.body); return Response.json({ data: { order_id: 'O1', payment_url: 'https://gateway.example/pay/O1' } }) },
+  })
+  await gw.create(100, 'http://localhost:5173/')
+  assert.equal(sent.redirect_url, undefined)
 })

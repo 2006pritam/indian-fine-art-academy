@@ -4,15 +4,18 @@ Set these server environment variables locally in `.env`, or in the Render servi
 
 | Variable | Value |
 | --- | --- |
-| `PAYMENT_API_KEY` | Your gateway API key, never a path to an `.env` file. |
-| `PAYMENT_API_URL` | `https://famapi.mistahub.in/api` |
+| `PAYMENT_API_KEY` | API key from your UPI gateway's **Settings** page (never a path to an `.env` file). |
+| `PAYMENT_API_SECRET` | API secret from the same page. Server-side only. |
+| `PAYMENT_API_URL` | `https://upi-gateway-iizu.onrender.com/api` (your gateway: github.com/2006pritam/upi_gateway) |
 | `PUBLIC_APP_URL` | The browser URL of this academy, such as `https://imfaa.onrender.com` in production or `http://localhost:5173` locally. Render's `RENDER_EXTERNAL_URL` is used if this is omitted. |
 
 Set the fee for each class in the admin portal. An explicitly configured fee of zero is free; an unset fee cannot be submitted as a free exam.
 
 Run `npm run build`, then restart the server with `npm run server`. Startup adds the payment order history and correction metadata and copies existing order references. Existing exam forms are retained.
 
-The gateway contract is `POST /create-order` with `{ amount, redirect_url }` (amount in INR rupees), followed by `GET /status/:orderId`. Both requests use the server's Bearer API key. A browser return URL does not prove payment: only a verified gateway response or an admin correction marks the form paid.
+The gateway contract is `POST /v1/orders` with `{ amount, client_order_id, redirect_url }` (amount in INR rupees, `redirect_url` only when https), which returns `data.payment_url` for the hosted UPI page, followed by `GET /v1/orders/:order_id` (status `pending`, `review`, `paid` or `expired`). Both requests send the server's `X-Api-Key` and `X-Api-Secret` headers.
+
+In the gateway's **Settings → Redirect domains**, add this academy's domain (for example `imfaa.onrender.com`) so students are sent back here after paying. If it is missing, checkout still works; the portal simply does not auto-redirect and checks the status itself. A browser return URL does not prove payment: only a verified gateway response or an admin correction marks the form paid.
 
 The student portal checks unresolved orders every 15 seconds while visible and when returning from a UPI app. The server also checks up to 25 forms every minute while it is running, so a student does not have to return from checkout. A sleeping hosting service resumes these checks after waking. Pending orders are reused; failed attempts are retained so a delayed success is still recognized.
 
